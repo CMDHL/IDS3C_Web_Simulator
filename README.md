@@ -1,6 +1,6 @@
 # ScaledCity Simulator
 
-This is a simulator for Cornell IDS Lab's scaled smart city.
+This is an unfinished simulator for Cornell IDS Lab's scaled smart city.
 
 ## Build locally
 
