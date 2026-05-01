@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>ScaledCity Simulator</title>
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body>
+    <main class="app-shell">
+      <header class="topbar">
+        <div>
+          <h1>ScaledCity Simulator</h1>
+          <p class="lab-name">Cornell IDS Lab</p>
+          <p id="status">Loading default map...</p>
+        </div>
+        <div class="stats" aria-live="polite">
+          <span id="timeReadout">0.00 s</span>
+          <span id="vehicleReadout">0 vehicles</span>
+        </div>
+      </header>
+
+      <section class="controls" aria-label="Playback and file controls">
+        <div class="transport">
+          <button id="playButton" type="button">Play</button>
+          <button id="resetButton" type="button">Reset</button>
+          <label class="slider-label" for="timeSlider">Time</label>
+          <input id="timeSlider" type="range" min="0" max="120" value="0" step="0.1">
+          <label class="speed-label" for="speedSelect">Speed</label>
+          <select id="speedSelect">
+            <option value="0.5">0.5x</option>
+            <option value="1" selected>1x</option>
+            <option value="2">2x</option>
+            <option value="4">4x</option>
+          </select>
+        </div>
+
+        <div class="file-grid">
+          <label>
+            Lines CSV
+            <input id="linesInput" type="file" accept=".csv,text/csv">
+          </label>
+          <label>
+            Arcs CSV
+            <input id="arcsInput" type="file" accept=".csv,text/csv">
+          </label>
+          <label>
+            Cars.yaml
+            <input id="carsInput" type="file" accept=".yaml,.yml,text/yaml,text/plain">
+          </label>
+          <label>
+            Experiment.yaml
+            <input id="experimentInput" type="file" accept=".yaml,.yml,text/yaml,text/plain">
+          </label>
+        </div>
+      </section>
+
+      <section class="viewport" aria-label="Simulation viewport">
+        <canvas id="scene" width="1200" height="760"></canvas>
+      </section>
+    </main>
+
+    <div id="errorDialog" class="modal" role="dialog" aria-modal="true" aria-labelledby="errorTitle" hidden>
+      <div class="modal-panel">
+        <h2 id="errorTitle">Cannot run simulation</h2>
+        <p id="errorMessage"></p>
+        <button id="errorCloseButton" type="button">OK</button>
+      </div>
+    </div>
+
+    <script src="viewer.js"></script>
+  </body>
+</html>
