@@ -55,6 +55,7 @@ const MAINFRAME_DT = 1 / 50;
 const DEFAULT_LINEUP_GAP = 0.18;
 const DEFAULT_FRONT_MARGIN = 0.04;
 const CAR_ORIGIN_REARWARD_OFFSET = 0.02;
+const COLLISION_CELL_SIZE = 0.35;
 const ROUTE_HIGHLIGHT_COLORS = [
   "rgba(229, 72, 77, 0.48)",
   "rgba(46, 134, 222, 0.48)",
@@ -123,6 +124,17 @@ function wrapAngle(angle) {
 
 function setStatus(message) {
   statusEl.textContent = message;
+}
+
+function collisionStatusText(collision = state.runtime?.collision) {
+  if (!collision?.hasCollision) return "";
+  const pairs = collision.pairs.map(([a, b]) => `${a}-${b}`).join(", ");
+  return `Collision detected between cars ${pairs}. Simulation stopped.`;
+}
+
+function setCollisionStatusIfNeeded() {
+  const message = collisionStatusText();
+  if (message) setStatus(message);
 }
 
 function showError(message) {
@@ -573,8 +585,10 @@ class SimulationRuntime {
     this.controlCarry = 0;
     this.mainframeCarry = 0;
     this.vehicles = createVehiclesWithLineup(map, scenario);
+    this.collision = emptyCollision();
     this.updateMainframeCommands();
     this.updateControllers(CONTROL_DT);
+    this.updateCollisionState();
   }
 
   reset() {
@@ -582,11 +596,15 @@ class SimulationRuntime {
     this.controlCarry = 0;
     this.mainframeCarry = 0;
     this.vehicles = createVehiclesWithLineup(this.map, state.scenario);
+    this.collision = emptyCollision();
     this.updateMainframeCommands();
     this.updateControllers(CONTROL_DT);
+    this.updateCollisionState();
   }
 
   step(dt) {
+    if (this.collision.hasCollision) return false;
+
     let remaining = dt;
     while (remaining > 0) {
       const h = Math.min(SIM_DT, remaining);
@@ -602,8 +620,11 @@ class SimulationRuntime {
       }
       this.integrate(h);
       this.time += h;
+      this.updateCollisionState();
+      if (this.collision.hasCollision) return false;
       remaining -= h;
     }
+    return true;
   }
 
   updateMainframeCommands() {
@@ -665,6 +686,14 @@ class SimulationRuntime {
     }
   }
 
+  updateCollisionState() {
+    this.collision = detectVehicleCollisions(this.vehicles);
+  }
+
+}
+
+function emptyCollision() {
+  return { hasCollision: false, vehicleIds: new Set(), pairs: [] };
 }
 
 function routeDistanceFromIndex(map, route, index, r) {
@@ -687,6 +716,97 @@ function findLeader(vehicle, vehicles, map) {
     if (distance < best.distance) best = { distance, velocity: other.pose.v };
   }
   return best;
+}
+
+function vehicleCollisionRect(vehicle) {
+  const length = vehicle.hardware.length;
+  const width = vehicle.hardware.width;
+  const front = Math.min(CAR_ORIGIN_REARWARD_OFFSET, length);
+  const rear = front - length;
+  const halfWidth = width * 0.5;
+  const forward = { x: Math.cos(vehicle.pose.theta), y: Math.sin(vehicle.pose.theta) };
+  const side = { x: -forward.y, y: forward.x };
+  const origin = vehicle.pose;
+  const makeCorner = (longitudinal, lateral) => ({
+    x: origin.x + forward.x * longitudinal + side.x * lateral,
+    y: origin.y + forward.y * longitudinal + side.y * lateral,
+  });
+  const corners = [
+    makeCorner(front, -halfWidth),
+    makeCorner(front, halfWidth),
+    makeCorner(rear, halfWidth),
+    makeCorner(rear, -halfWidth),
+  ];
+  const aabb = corners.reduce((acc, corner) => ({
+    minX: Math.min(acc.minX, corner.x),
+    maxX: Math.max(acc.maxX, corner.x),
+    minY: Math.min(acc.minY, corner.y),
+    maxY: Math.max(acc.maxY, corner.y),
+  }), { minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity });
+  return { vehicle, corners, axes: [forward, side], aabb };
+}
+
+function rectsOverlap(a, b) {
+  for (const axis of [...a.axes, ...b.axes]) {
+    let minA = Infinity;
+    let maxA = -Infinity;
+    let minB = Infinity;
+    let maxB = -Infinity;
+    for (const corner of a.corners) {
+      const projection = corner.x * axis.x + corner.y * axis.y;
+      minA = Math.min(minA, projection);
+      maxA = Math.max(maxA, projection);
+    }
+    for (const corner of b.corners) {
+      const projection = corner.x * axis.x + corner.y * axis.y;
+      minB = Math.min(minB, projection);
+      maxB = Math.max(maxB, projection);
+    }
+    if (maxA <= minB || maxB <= minA) return false;
+  }
+  return true;
+}
+
+function cellKey(x, y) {
+  return `${x},${y}`;
+}
+
+function detectVehicleCollisions(vehicles) {
+  const rects = vehicles.map(vehicleCollisionRect);
+  const grid = new Map();
+  const tested = new Set();
+  const pairs = [];
+  const vehicleIds = new Set();
+
+  for (const rect of rects) {
+    const minCellX = Math.floor(rect.aabb.minX / COLLISION_CELL_SIZE);
+    const maxCellX = Math.floor(rect.aabb.maxX / COLLISION_CELL_SIZE);
+    const minCellY = Math.floor(rect.aabb.minY / COLLISION_CELL_SIZE);
+    const maxCellY = Math.floor(rect.aabb.maxY / COLLISION_CELL_SIZE);
+
+    for (let cellX = minCellX; cellX <= maxCellX; cellX += 1) {
+      for (let cellY = minCellY; cellY <= maxCellY; cellY += 1) {
+        const key = cellKey(cellX, cellY);
+        const occupants = grid.get(key) || [];
+        for (const other of occupants) {
+          const low = Math.min(rect.vehicle.id, other.vehicle.id);
+          const high = Math.max(rect.vehicle.id, other.vehicle.id);
+          const pairKey = `${low}:${high}`;
+          if (tested.has(pairKey)) continue;
+          tested.add(pairKey);
+          if (rectsOverlap(rect, other)) {
+            pairs.push([low, high]);
+            vehicleIds.add(low);
+            vehicleIds.add(high);
+          }
+        }
+        occupants.push(rect);
+        grid.set(key, occupants);
+      }
+    }
+  }
+
+  return { hasCollision: pairs.length > 0, vehicleIds, pairs };
 }
 
 function createVehiclesWithLineup(map, scenario) {
@@ -838,13 +958,18 @@ function drawVehicle(vehicle, index, project) {
   const width = vehicle.hardware.width * scale;
   const originOffset = Math.min(CAR_ORIGIN_REARWARD_OFFSET, vehicle.hardware.length) * scale;
   const theta = -vehicle.pose.theta + Math.PI;
+  const collided = state.runtime?.collision.vehicleIds.has(vehicle.id);
 
   ctx.save();
   ctx.translate(origin.x, origin.y);
   ctx.rotate(theta);
-  ctx.fillStyle = vehicle.config.mode === "HDV" ? "#777f86" : "#c82127";
-  ctx.strokeStyle = "#ffffff";
-  ctx.lineWidth = 1.5;
+  if (collided) {
+    ctx.shadowColor = "rgba(255, 195, 0, 0.88)";
+    ctx.shadowBlur = 14;
+  }
+  ctx.fillStyle = collided ? "#ffd43b" : vehicle.config.mode === "HDV" ? "#777f86" : "#c82127";
+  ctx.strokeStyle = collided ? "#101820" : "#ffffff";
+  ctx.lineWidth = collided ? 2.4 : 1.5;
   ctx.beginPath();
   ctx.rect(-length + originOffset, -width / 2, length, width);
   ctx.fill();
@@ -909,9 +1034,14 @@ function tick(nowMs) {
   if (!state.playing) return;
   const elapsed = state.lastTickMs ? (nowMs - state.lastTickMs) / 1000 : 0;
   state.lastTickMs = nowMs;
-  state.runtime?.step(Math.min(0.08, elapsed * Number(speedSelect.value)));
+  const advanced = state.runtime?.step(Math.min(0.08, elapsed * Number(speedSelect.value)));
+  if (state.runtime?.collision.hasCollision) {
+    state.playing = false;
+    playButton.textContent = "Play";
+    setCollisionStatusIfNeeded();
+  }
   draw();
-  requestAnimationFrame(tick);
+  if (advanced !== false && state.playing) requestAnimationFrame(tick);
 }
 
 async function fetchText(path) {
@@ -1019,7 +1149,7 @@ async function refreshFromUploads() {
   }
 
   if (loadRuntime(state.sourceTexts.lines, state.sourceTexts.arcs, state.sourceTexts.cars, state.sourceTexts.experiment)) {
-    setStatus("Simulation ready.");
+    setStatus(collisionStatusText() || "Simulation ready.");
   }
 }
 
@@ -1031,6 +1161,7 @@ playButton.addEventListener("click", () => {
   state.playing = !state.playing;
   playButton.textContent = state.playing ? "Pause" : "Play";
   state.lastTickMs = 0;
+  setCollisionStatusIfNeeded();
   if (state.playing) requestAnimationFrame(tick);
 });
 
@@ -1050,6 +1181,7 @@ resetButton.addEventListener("click", () => {
   state.playing = false;
   playButton.textContent = "Play";
   state.runtime.reset();
+  setStatus(collisionStatusText() || "Simulation reset.");
   draw();
 });
 
@@ -1057,9 +1189,13 @@ timeSlider.addEventListener("input", () => {
   if (!state.runtime) return;
   const target = Number(timeSlider.value);
   state.runtime.reset();
-  while (state.runtime.time < target) state.runtime.step(Math.min(0.1, target - state.runtime.time));
+  while (state.runtime.time < target) {
+    const advanced = state.runtime.step(Math.min(0.1, target - state.runtime.time));
+    if (advanced === false) break;
+  }
   state.playing = false;
   playButton.textContent = "Play";
+  setStatus(collisionStatusText() || "Simulation paused.");
   draw();
 });
 

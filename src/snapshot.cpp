@@ -18,7 +18,8 @@ void JsonLinesSnapshotSink::write(const FrameSnapshot& frame) {
          << ",\"x\":" << std::setprecision(6) << vehicle.x
          << ",\"y\":" << vehicle.y
          << ",\"speed\":" << vehicle.speed
-         << ",\"segment\":\"" << vehicle.segmentId << "\"}";
+         << ",\"segment\":\"" << vehicle.segmentId
+         << "\",\"collided\":" << (vehicle.collided ? "true" : "false") << "}";
   }
   out_ << "]}\n";
 }

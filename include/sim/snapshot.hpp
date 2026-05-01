@@ -13,6 +13,7 @@ struct VehicleSnapshot {
   double y = 0.0;
   double speed = 0.0;
   std::string segmentId;
+  bool collided = false;
 };
 
 struct FrameSnapshot {

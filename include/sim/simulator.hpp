@@ -24,11 +24,14 @@ class Simulator {
   FrameSnapshot snapshot() const;
   void step(double dtSeconds);
   double time() const { return timeSeconds_; }
+  bool collided() const { return collided_; }
 
  private:
   const RoadMap& roadMap_;
   double timeSeconds_ = 0.0;
   std::vector<VehicleState> vehicles_;
+  std::vector<int> collisionVehicleIds_;
+  bool collided_ = false;
 };
 
 }  // namespace sim
