@@ -56,13 +56,16 @@ const DEFAULT_LINEUP_GAP = 0.18;
 const DEFAULT_FRONT_MARGIN = 0.04;
 const CAR_ORIGIN_REARWARD_OFFSET = 0.02;
 const COLLISION_CELL_SIZE = 0.35;
+const INTERSECTION_QUEUE_DISTANCE = 0.20;
+const STOPPING_BUFFER = 0.9 * 0.22;
+const CONTROL_ZONE_CAR_LENGTH_ALLOWANCE = 0.1;
 const ROUTE_HIGHLIGHT_COLORS = [
-  "rgba(229, 72, 77, 0.48)",
-  "rgba(46, 134, 222, 0.48)",
-  "rgba(34, 166, 99, 0.48)",
-  "rgba(245, 166, 35, 0.48)",
-  "rgba(146, 83, 191, 0.48)",
-  "rgba(28, 160, 170, 0.48)",
+  "rgba(229, 72, 77, 0.13)",
+  "rgba(46, 134, 222, 0.13)",
+  "rgba(34, 166, 99, 0.13)",
+  "rgba(245, 166, 35, 0.13)",
+  "rgba(146, 83, 191, 0.13)",
+  "rgba(28, 160, 170, 0.13)",
 ];
 
 const canvas = document.querySelector("#scene");
@@ -183,70 +186,239 @@ function splitList(value) {
   return value.split(",").map((item) => item.trim()).filter(Boolean);
 }
 
-function parseCarsYaml(text) {
-  const anchorRoutes = new Map();
-  const vehicles = [];
-  let currentAnchor = null;
-  let currentVehicle = null;
+function countIndent(line) {
+  let count = 0;
+  for (const char of line) {
+    if (char === " ") count += 1;
+    else if (char === "\t") count += 4;
+    else break;
+  }
+  return count;
+}
 
-  const finishVehicle = () => {
-    if (!currentVehicle) return;
-    if (currentVehicle.route.length) vehicles.push(currentVehicle);
-    currentVehicle = null;
-  };
+class YamlNode {
+  constructor(key = "", value = "", anchor = "") {
+    this.key = key;
+    this.value = value.trim();
+    this.anchor = anchor;
+    this.children = new Map();
+    this.order = [];
+  }
 
+  add(child) {
+    this.children.set(child.key, child);
+    this.order.push(child);
+  }
+
+  has(key) {
+    return this.children.has(key);
+  }
+
+  child(key) {
+    return this.children.get(key) || null;
+  }
+
+  childValue(key, fallback = "") {
+    const child = this.child(key);
+    return child ? child.value.trim() : fallback;
+  }
+}
+
+function parseSimpleYaml(text) {
+  const root = new YamlNode("__root__");
+  const stack = [{ indent: -1, node: root }];
   for (const rawLine of text.split(/\r?\n/)) {
-    const line = stripComment(rawLine).trim();
-    if (!line) continue;
-
-    const anchorMatch = line.match(/^[^:]+:\s*&([A-Za-z0-9_]+)/);
+    const uncommented = stripComment(rawLine);
+    if (!uncommented.trim()) continue;
+    const indent = countIndent(uncommented);
+    const trimmed = uncommented.trim();
+    const colon = trimmed.indexOf(":");
+    if (colon < 0) continue;
+    const key = trimmed.slice(0, colon).trim();
+    let value = trimmed.slice(colon + 1).trim();
+    let anchor = "";
+    const anchorMatch = value.match(/^(.*?)\s*&([A-Za-z0-9_]+)\s*$/);
     if (anchorMatch) {
-      finishVehicle();
-      currentAnchor = anchorMatch[1];
-      continue;
+      value = anchorMatch[1].trim();
+      anchor = anchorMatch[2];
     }
+    const node = new YamlNode(key, value, anchor);
+    while (stack.length && indent <= stack[stack.length - 1].indent) stack.pop();
+    stack[stack.length - 1].node.add(node);
+    stack.push({ indent, node });
+  }
+  return root;
+}
 
-    const vehicleMatch = line.match(/^Vehicle[^\s:]*\s*:\s*([0-9]+)/);
-    if (vehicleMatch) {
-      finishVehicle();
-      currentAnchor = null;
-      currentVehicle = {
-        id: Number(vehicleMatch[1]),
-        version: "manta",
-        mode: "CAV",
-        controller: "IDM",
-        speed: 0.35,
-        route: [],
-      };
-      continue;
-    }
+function nodeChildrenWithPrefix(node, prefix) {
+  if (!node) return [];
+  return node.order.filter((child) => child.key.startsWith(prefix));
+}
 
-    if (line.startsWith("Segments")) {
-      const route = splitList(afterColon(line));
-      if (currentAnchor) anchorRoutes.set(currentAnchor, route);
-      else if (currentVehicle) currentVehicle.route = route;
-      continue;
-    }
+function parseCarsYaml(text) {
+  const root = parseSimpleYaml(text);
+  const anchorPaths = new Map();
+  const vehicles = [];
 
-    if (!currentVehicle) continue;
-    if (line.startsWith("Version")) currentVehicle.version = afterColon(line) || "manta";
-    else if (line.startsWith("Mode")) currentVehicle.mode = afterColon(line) || "CAV";
-    else if (line.startsWith("Path")) {
-      const value = afterColon(line);
-      if (value.startsWith("*")) currentVehicle.route = anchorRoutes.get(value.slice(1)) || [];
-    } else if (line.startsWith("Controllers")) {
-      currentVehicle.controller = splitList(afterColon(line))[0] || "IDM";
-    } else if (line.match(/^speed\s*:/)) {
-      currentVehicle.speed = Number(afterColon(line));
+  for (const child of root.order) {
+    if (child.anchor) {
+      anchorPaths.set(child.anchor, {
+        type: child.childValue("Type", "Loop"),
+        route: splitList(child.childValue("Segments")),
+      });
     }
   }
 
-  finishVehicle();
+  for (const node of nodeChildrenWithPrefix(root, "Vehicle")) {
+    const id = Number(node.value);
+    if (!Number.isFinite(id)) continue;
+    const vehicle = {
+      id,
+      version: node.childValue("Version", "manta"),
+      mode: node.childValue("Mode", "CAV"),
+      controller: "IDM",
+      controllers: splitList(node.childValue("Controllers")),
+      switchSegments: splitList(node.childValue("Switch")),
+      speed: 0.35,
+      route: [],
+      pathType: "Loop",
+    };
+
+    const pathValue = node.childValue("Path");
+    const inlinePath = node.child("Path");
+    if (pathValue.startsWith("*")) {
+      const path = anchorPaths.get(pathValue.slice(1));
+      if (path) {
+        vehicle.pathType = path.type;
+        vehicle.route = path.route;
+      }
+    } else if (inlinePath) {
+      vehicle.pathType = inlinePath.childValue("Type", "Loop");
+      vehicle.route = splitList(inlinePath.childValue("Segments"));
+    }
+
+    if (!vehicle.controllers.length && node.has("Controller")) {
+      vehicle.controllers = ["Controller"];
+      vehicle.controller = node.childValue("Controller", "IDM");
+    } else if (vehicle.controllers.length) {
+      vehicle.controller = vehicle.controllers[0];
+    }
+
+    const speedNodes = vehicle.controllers.length ? vehicle.controllers : ["Controller"];
+    for (const controllerName of speedNodes) {
+      const controllerNode = node.child(controllerName);
+      if (!controllerNode) continue;
+      const speed = Number(controllerNode.childValue("speed"));
+      if (Number.isFinite(speed)) {
+        vehicle.speed = speed;
+        break;
+      }
+    }
+
+    if (vehicle.route.length) vehicles.push(vehicle);
+  }
+
   return { vehicles };
 }
 
 function parseExperimentYaml(text) {
-  return { raw: text };
+  const root = parseSimpleYaml(text);
+  const experiment = root.order.find((child) => child.key.startsWith("Experiment")) || root;
+  const queues = [];
+  const yields = [];
+  const stops = [];
+  const controlZones = [];
+
+  for (const child of experiment.order) {
+    if (child.key.startsWith("Queue")) {
+      const typeNode = child.child("type");
+      const segmentsNode = child.child("segments");
+      const deterministic = (typeNode?.value || "").startsWith("Det");
+      queues.push({
+        name: child.key,
+        label: child.value,
+        random: !deterministic,
+        inflow: Number(typeNode?.childValue("inflow", "0")) || 0,
+        inflowMin: Number(typeNode?.childValue("inflowMin", "0")) || 0,
+        inflowMax: Number(typeNode?.childValue("inflowMax", "0")) || 0,
+        delay: Number(typeNode?.childValue("delay", "0")) || 0,
+        delayMin: Number(typeNode?.childValue("inflowDelayMin", "0")) || 0,
+        delayMax: Number(typeNode?.childValue("inflowDelayMax", "0")) || 0,
+        releaseDelta: Number(typeNode?.childValue("releaseDelta", "0")) || 0,
+        segments: splitList(segmentsNode?.value || ""),
+        offset: Number(segmentsNode?.childValue("offset", "0")) || 0,
+        backup: splitList(segmentsNode?.childValue("backup", "")),
+      });
+    } else if (child.key.startsWith("Yield")) {
+      const segmentsNode = child.child("segments");
+      const yieldToNode = child.child("yieldTo");
+      const yieldSegments = splitList(yieldToNode?.value || "");
+      const offsets = splitList(yieldToNode?.childValue("offsets", "")).map(Number).filter(Number.isFinite);
+      while (offsets.length < yieldSegments.length) offsets.push(0);
+      yields.push({
+        name: child.key,
+        label: child.value,
+        segments: splitList(segmentsNode?.value || ""),
+        offset: Number(segmentsNode?.childValue("offset", "0")) || 0,
+        yieldTo: yieldSegments,
+        offsets,
+      });
+    } else if (child.key.startsWith("Stop")) {
+      const groups = [];
+      for (const groupNode of nodeChildrenWithPrefix(child, "Group")) {
+        groups.push({
+          name: groupNode.key,
+          label: groupNode.value,
+          segments: splitList(groupNode.childValue("segments")),
+          offset: 0,
+        });
+      }
+      stops.push({
+        name: child.key,
+        label: child.value,
+        groups,
+        conflictSegments: splitList(child.childValue("conflictSegments")),
+      });
+    } else if (child.key.startsWith("ControlZone")) {
+      const entries = [];
+      const nodes = [];
+      for (const zoneChild of child.order) {
+        if (zoneChild.key.startsWith("ControlZone")) {
+          entries.push({
+            name: zoneChild.key,
+            label: zoneChild.value,
+            segments: splitList(zoneChild.childValue("segments")),
+            initialOffset: Number(zoneChild.childValue("initialOffset", "0")) || 0,
+            finalOffset: Number(zoneChild.childValue("finalOffset", "0")) || 0,
+            safetyTimeGap: Number(zoneChild.childValue("safetyTimeGap", "0")) || 0,
+          });
+        } else if (zoneChild.key.startsWith("Node")) {
+          nodes.push({
+            name: zoneChild.key,
+            label: zoneChild.value,
+            segments: splitList(zoneChild.childValue("segments")),
+            distances: splitList(zoneChild.childValue("distances")).map(Number).filter(Number.isFinite),
+          });
+        }
+      }
+      controlZones.push({
+        name: child.key,
+        label: child.value,
+        scheduler: child.childValue("Scheduler", "SimpleFIFO"),
+        entries,
+        nodes,
+      });
+    }
+  }
+
+  return {
+    baseline: experiment.childValue("Baseline", "false").slice(0, 4) === "true",
+    simulation: experiment.childValue("Simulation", "false").slice(0, 4) === "true",
+    queues,
+    yields,
+    stops,
+    controlZones,
+  };
 }
 
 class Segment {
@@ -406,6 +578,40 @@ class CarPathController {
     this.lastT = t;
     this.timePrev = t;
     this.velOld = 0;
+  }
+
+  captureState() {
+    return {
+      r: this.r,
+      r2: this.r2,
+      lastT: this.lastT,
+      timePrev: this.timePrev,
+      velOld: this.velOld,
+      prevSteer: this.prevSteer,
+      lastPosError: this.lastPosError,
+      velocityDesired: this.velocityDesired,
+      positionDesired: { ...this.positionDesired },
+      pathLength: this.pathLength,
+      cmdType: this.cmdType,
+      velocityProfile: [...(this.velocityProfile || [])],
+      timeStamp: [...(this.timeStamp || [])],
+    };
+  }
+
+  restoreState(snapshot) {
+    this.r = snapshot.r;
+    this.r2 = snapshot.r2;
+    this.lastT = snapshot.lastT;
+    this.timePrev = snapshot.timePrev;
+    this.velOld = snapshot.velOld;
+    this.prevSteer = snapshot.prevSteer;
+    this.lastPosError = snapshot.lastPosError;
+    this.velocityDesired = snapshot.velocityDesired;
+    this.positionDesired = { ...snapshot.positionDesired };
+    this.pathLength = snapshot.pathLength;
+    this.cmdType = snapshot.cmdType;
+    this.velocityProfile = [...(snapshot.velocityProfile || [])];
+    this.timeStamp = [...(snapshot.timeStamp || [])];
   }
 
   receive(command, pose, t) {
@@ -576,30 +782,75 @@ class SimVehicle {
     }
     this.routeDistance = routeDistanceFromIndex(map, this.route, this.segmentIndex, this.r);
   }
+
+  nextRouteSegmentId(offset = 1) {
+    return this.route[(this.segmentIndex + offset) % this.route.length];
+  }
+
+  captureState() {
+    return {
+      id: this.id,
+      routeDistance: this.routeDistance,
+      segmentIndex: this.segmentIndex,
+      r: this.r,
+      pose: { ...this.pose },
+      desired: { ...this.desired },
+      control: this.control ? { ...this.control, desired: { ...this.control.desired } } : null,
+      controller: this.controller.captureState(),
+    };
+  }
+
+  restoreState(snapshot, map) {
+    this.routeDistance = snapshot.routeDistance;
+    this.segmentIndex = snapshot.segmentIndex;
+    this.r = snapshot.r;
+    this.pose = { ...snapshot.pose };
+    this.desired = { ...snapshot.desired };
+    this.control = snapshot.control ? { ...snapshot.control, desired: { ...snapshot.control.desired } } : null;
+    this.controller.restoreState(snapshot.controller);
+    if (map) {
+      this.controller.pathSegment = this.currentSegment(map);
+      this.controller.nextPathSegment = this.nextSegment(map);
+    }
+  }
 }
 
 class SimulationRuntime {
   constructor(map, scenario) {
     this.map = map;
+    this.scenario = scenario;
+    this.experiment = state.experiment || parseExperimentYaml("");
     this.time = 0;
     this.controlCarry = 0;
     this.mainframeCarry = 0;
     this.vehicles = createVehiclesWithLineup(map, scenario);
+    this.intersections = buildIntersectionControls(this.experiment, map);
+    this.experimentState = "WAITING";
+    this.experimentCount = 0;
     this.collision = emptyCollision();
+    this.history = [];
+    this.historyCursor = null;
     this.updateMainframeCommands();
     this.updateControllers(CONTROL_DT);
     this.updateCollisionState();
+    this.recordHistory();
   }
 
   reset() {
     this.time = 0;
     this.controlCarry = 0;
     this.mainframeCarry = 0;
-    this.vehicles = createVehiclesWithLineup(this.map, state.scenario);
+    this.vehicles = createVehiclesWithLineup(this.map, this.scenario);
+    this.intersections = buildIntersectionControls(this.experiment, this.map);
+    this.experimentState = "WAITING";
+    this.experimentCount = 0;
     this.collision = emptyCollision();
+    this.history = [];
+    this.historyCursor = null;
     this.updateMainframeCommands();
     this.updateControllers(CONTROL_DT);
     this.updateCollisionState();
+    this.recordHistory();
   }
 
   step(dt) {
@@ -624,10 +875,12 @@ class SimulationRuntime {
       if (this.collision.hasCollision) return false;
       remaining -= h;
     }
+    this.recordHistory();
     return true;
   }
 
   updateMainframeCommands() {
+    this.updateIntersections();
     for (const vehicle of this.vehicles) {
       vehicle.transitionIfNeeded(this.map);
       const current = vehicle.currentSegment(this.map);
@@ -651,14 +904,90 @@ class SimulationRuntime {
     const a = 0.9;
     const b = 0.8;
     const delta = 4;
-    const vUpper = Math.min(vehicle.targetSpeed, vehicle.currentSegment(this.map).speedLimit);
+    let vUpper = Math.min(vehicle.targetSpeed, vehicle.currentSegment(this.map).speedLimit);
     const v0 = vehicle.pose.v;
-    const sn = Math.max(0.001, leader.distance - vehicle.hardware.length);
-    const delV = v0 - leader.velocity;
+    const gate = this.intersectionGate(vehicle, leader);
+    vUpper = Math.min(vUpper, this.controlZoneSpeedLimit(vehicle));
+    const sn = Math.max(0.001, gate.distance - vehicle.hardware.length);
+    const delV = v0 - gate.velocity;
     const sStar = s0 + Math.max(0, v0 * th + (v0 * delV) / (2 * Math.sqrt(a * b)));
     const accel = clamp(a * (1 - Math.pow(v0 / Math.max(vUpper, 0.001), delta) - Math.pow(sStar / sn, 2)), -10, 10);
     const command = v0 + accel * MAINFRAME_DT;
     return sn < s0 ? 0 : clamp(command + 0.05 * (command - v0), 0, vUpper);
+  }
+
+  startExperiment() {
+    for (const control of this.intersections) {
+      if (control.kind === "queue") control.start(this.time);
+    }
+  }
+
+  stopExperiment() {
+    this.experimentCount += 1;
+    for (const control of this.intersections) {
+      if (control.kind === "queue") control.reset();
+    }
+  }
+
+  updateIntersections() {
+    for (const control of this.intersections) {
+      if (typeof control.update === "function") control.update(this);
+    }
+    this.updateExperimentLifecycle();
+  }
+
+  updateExperimentLifecycle() {
+    const queues = this.intersections.filter((control) => control.kind === "queue");
+    if (!queues.length) return;
+
+    if (this.experimentState === "WAITING") {
+      const ready = queues.every((queue) => queue.isReady());
+      const allOperational = queues.every((queue) => queue.allOperational);
+      if (ready && (this.experimentCount === 0 || allOperational)) {
+        this.experimentState = "STARTING";
+      }
+    }
+
+    if (this.experimentState === "STARTING") {
+      this.startExperiment();
+      this.experimentState = "RUNNING";
+    } else if (this.experimentState === "RUNNING" && queues.some((queue) => queue.isBack)) {
+      this.experimentState = "WAITING";
+      this.stopExperiment();
+    }
+  }
+
+  intersectionGate(vehicle, leader) {
+    let gate = leader;
+    for (const control of this.intersectionsForVehicle(vehicle)) {
+      const distance = control.distanceToGate(vehicle, this.map);
+      if (distance <= 0) continue;
+      const canGo = control.canGo(vehicle, this);
+      if (!canGo) {
+        const stopDistance = distance + STOPPING_BUFFER;
+        if (stopDistance <= gate.distance) gate = { distance: stopDistance, velocity: 0 };
+      }
+      if (distance < INTERSECTION_QUEUE_DISTANCE && typeof control.addToQueue === "function") {
+        control.addToQueue(vehicle);
+      }
+    }
+
+    for (const control of this.intersections) {
+      if (typeof control.removeIfPast === "function") control.removeIfPast(vehicle, this);
+    }
+    return gate;
+  }
+
+  intersectionsForVehicle(vehicle) {
+    return this.intersections.filter((control) => control.matchesVehicle(vehicle));
+  }
+
+  controlZoneSpeedLimit(vehicle) {
+    let limit = Infinity;
+    for (const control of this.intersectionsForVehicle(vehicle)) {
+      if (typeof control.speedLimitFor === "function") limit = Math.min(limit, control.speedLimitFor(vehicle, this));
+    }
+    return Number.isFinite(limit) ? limit : vehicle.targetSpeed;
   }
 
   updateControllers(dt) {
@@ -690,6 +1019,397 @@ class SimulationRuntime {
     this.collision = detectVehicleCollisions(this.vehicles);
   }
 
+  recordHistory() {
+    this.historyCursor = null;
+    this.history.push(this.captureState());
+  }
+
+  restoreHistoryPercent(percent) {
+    if (!this.history.length) return;
+    const index = Math.round(clamp(percent, 0, 1) * (this.history.length - 1));
+    this.restoreState(this.history[index]);
+    this.historyCursor = index;
+    this.updateCollisionState();
+  }
+
+  commitHistoryCursor() {
+    if (this.historyCursor === null) return;
+    this.restoreState(this.history[this.historyCursor]);
+    this.history = this.history.slice(0, this.historyCursor + 1);
+    this.historyCursor = null;
+  }
+
+  captureState() {
+    return {
+      time: this.time,
+      controlCarry: this.controlCarry,
+      mainframeCarry: this.mainframeCarry,
+      experimentState: this.experimentState,
+      experimentCount: this.experimentCount,
+      vehicles: this.vehicles.map((vehicle) => vehicle.captureState()),
+      intersections: this.intersections.map((control) => control.captureState?.() || null),
+      collision: {
+        pairs: this.collision.pairs.map((pair) => [...pair]),
+        vehicleIds: [...this.collision.vehicleIds],
+      },
+    };
+  }
+
+  restoreState(snapshot) {
+    this.time = snapshot.time;
+    this.controlCarry = snapshot.controlCarry;
+    this.mainframeCarry = snapshot.mainframeCarry;
+    this.experimentState = snapshot.experimentState;
+    this.experimentCount = snapshot.experimentCount;
+    for (const vehicleState of snapshot.vehicles) {
+      const vehicle = this.vehicles.find((item) => item.id === vehicleState.id);
+      if (vehicle) vehicle.restoreState(vehicleState, this.map);
+    }
+    snapshot.intersections.forEach((controlState, index) => {
+      if (controlState && this.intersections[index]?.restoreState) {
+        this.intersections[index].restoreState(controlState);
+      }
+    });
+    this.collision = {
+      hasCollision: snapshot.collision.pairs.length > 0,
+      pairs: snapshot.collision.pairs.map((pair) => [...pair]),
+      vehicleIds: new Set(snapshot.collision.vehicleIds),
+    };
+  }
+
+}
+
+class BaseIntersectionControl {
+  constructor(kind, config) {
+    this.kind = kind;
+    this.config = config;
+    this.queue = [];
+  }
+
+  matchesVehicle(vehicle) {
+    return this.matchingGroup(vehicle) !== null;
+  }
+
+  matchingGroup(vehicle) {
+    const groups = this.groups || [];
+    for (let groupIndex = 0; groupIndex < groups.length; groupIndex += 1) {
+      const group = groups[groupIndex];
+      let found = true;
+      for (let i = 0; i < group.segments.length; i += 1) {
+        if (group.segments[i] !== vehicle.nextRouteSegmentId(i)) {
+          found = false;
+          break;
+        }
+      }
+      if (found) return { group, groupIndex };
+    }
+    return null;
+  }
+
+  distanceToGate(vehicle, map) {
+    const match = this.matchingGroup(vehicle);
+    if (!match) return Infinity;
+    return map.get(vehicle.route[vehicle.segmentIndex]).length - vehicle.r - (match.group.offset || 0);
+  }
+
+  addToQueue(vehicle) {
+    if (this.queue.some((item) => item.id === vehicle.id)) return;
+    this.queue.push({ id: vehicle.id, nextSegment: vehicle.nextRouteSegmentId() });
+  }
+
+  removeIfPast(vehicle, runtime) {
+    if (!this.queue.some((item) => item.id === vehicle.id)) return;
+    if (this.matchesVehicle(vehicle)) return;
+    this.queue = this.queue.filter((item) => item.id !== vehicle.id);
+  }
+
+  captureState() {
+    return {
+      queue: this.queue.map((item) => ({ ...item })),
+    };
+  }
+
+  restoreState(snapshot) {
+    this.queue = snapshot.queue.map((item) => ({ ...item }));
+  }
+}
+
+class QueueSignControl extends BaseIntersectionControl {
+  constructor(config) {
+    super("queue", config);
+    this.groups = [{ segments: config.segments, offset: config.offset || 0 }];
+    this.backupSegments = config.backup || [];
+    this.reset();
+  }
+
+  reset() {
+    if (this.config.random) {
+      this.inflow = randomInt(this.config.inflowMin, this.config.inflowMax);
+      this.delay = randomFloat(this.config.delayMin, this.config.delayMax);
+    } else {
+      this.inflow = this.config.inflow;
+      this.delay = this.config.delay;
+    }
+    this.stop = true;
+    this.passed = [];
+    this.isBack = false;
+    this.awaitingQueueDeparture = true;
+    if (this.currentOccupants === undefined) this.currentOccupants = [];
+    if (this.pastOccupants === undefined) this.pastOccupants = [];
+    if (this.lastReleaseTime === undefined) this.lastReleaseTime = -Infinity;
+    if (this.allOperational === undefined) this.allOperational = false;
+  }
+
+  start(time) {
+    this.stop = false;
+    this.startTime = time;
+    this.passed = [];
+    this.currentOccupants = [];
+    this.pastOccupants = [];
+    this.isBack = false;
+    this.awaitingQueueDeparture = true;
+  }
+
+  update(runtime) {
+    this.currentOccupants = vehiclesOnSegments(runtime.vehicles, [...this.groups[0].segments, ...this.backupSegments]);
+    const enteredNow = this.currentOccupants.some((id) => !this.pastOccupants.includes(id));
+    if (this.awaitingQueueDeparture && this.currentOccupants.length === 0) {
+      this.awaitingQueueDeparture = false;
+    }
+    this.isBack = !this.awaitingQueueDeparture && enteredNow;
+    for (const id of this.pastOccupants) {
+      if (!this.currentOccupants.includes(id)) {
+        this.passed.push(id);
+        this.lastReleaseTime = runtime.time;
+      }
+    }
+    if (this.passed.length >= this.inflow) this.allOperational = true;
+    this.pastOccupants = [...this.currentOccupants];
+  }
+
+  canGo(vehicle, runtime) {
+    const current = vehicle.route[vehicle.segmentIndex];
+    if (current !== this.groups[0].segments[0]) return true;
+    if (this.stop) return false;
+    if (runtime.time - this.startTime < this.delay) return false;
+    if (runtime.time - this.lastReleaseTime < this.config.releaseDelta) return false;
+    return true;
+  }
+
+  isReady() {
+    return this.currentOccupants.length >= this.inflow;
+  }
+
+  captureState() {
+    return {
+      ...super.captureState(),
+      inflow: this.inflow,
+      delay: this.delay,
+      stop: this.stop,
+      passed: [...this.passed],
+      currentOccupants: [...this.currentOccupants],
+      pastOccupants: [...this.pastOccupants],
+      lastReleaseTime: this.lastReleaseTime,
+      startTime: this.startTime,
+      isBack: this.isBack,
+      awaitingQueueDeparture: this.awaitingQueueDeparture,
+      allOperational: this.allOperational,
+    };
+  }
+
+  restoreState(snapshot) {
+    super.restoreState(snapshot);
+    this.inflow = snapshot.inflow;
+    this.delay = snapshot.delay;
+    this.stop = snapshot.stop;
+    this.passed = [...snapshot.passed];
+    this.currentOccupants = [...snapshot.currentOccupants];
+    this.pastOccupants = [...snapshot.pastOccupants];
+    this.lastReleaseTime = snapshot.lastReleaseTime;
+    this.startTime = snapshot.startTime;
+    this.isBack = snapshot.isBack;
+    this.awaitingQueueDeparture = snapshot.awaitingQueueDeparture;
+    this.allOperational = snapshot.allOperational;
+  }
+}
+
+class YieldSignControl extends BaseIntersectionControl {
+  constructor(config) {
+    super("yield", config);
+    this.groups = [{ segments: config.segments, offset: config.offset || 0 }];
+  }
+
+  canGo(vehicle, runtime) {
+    for (let i = 0; i < this.config.yieldTo.length; i += 1) {
+      const segmentId = this.config.yieldTo[i];
+      const offset = this.config.offsets[i] || 0;
+      for (const other of runtime.vehicles) {
+        if (other.id !== vehicle.id && other.route[other.segmentIndex] === segmentId && other.r >= offset) return false;
+      }
+    }
+    return true;
+  }
+}
+
+class StopZoneControl extends BaseIntersectionControl {
+  constructor(config) {
+    super("stop", config);
+    this.groups = config.groups.map((group) => ({ segments: group.segments, offset: 0 }));
+    this.fifo = [];
+    this.hasStopped = false;
+  }
+
+  update(runtime) {
+    let frontFound = false;
+    const zoneSegments = this.groups.flatMap((group) => group.segments);
+    for (const vehicle of runtime.vehicles) {
+      if (!zoneSegments.includes(vehicle.route[vehicle.segmentIndex])) continue;
+      if (!this.fifo.includes(vehicle.id)) {
+        this.fifo.push(vehicle.id);
+        if (this.fifo.length === 1) frontFound = true;
+      } else if (vehicle.id === this.fifo[0]) {
+        frontFound = true;
+      }
+    }
+    if (!frontFound && this.fifo.length > 0) {
+      this.fifo.shift();
+      this.hasStopped = false;
+    }
+  }
+
+  canGo(vehicle, runtime) {
+    if (!this.fifo.length || this.fifo[0] !== vehicle.id) return false;
+    this.hasStopped = this.hasStopped || vehicle.pose.v < 0.02;
+    let conflictCount = 0;
+    for (const other of runtime.vehicles) {
+      if (other.id !== vehicle.id && this.config.conflictSegments.includes(other.route[other.segmentIndex])) conflictCount += 1;
+    }
+    return this.hasStopped && conflictCount === 0;
+  }
+
+  captureState() {
+    return {
+      ...super.captureState(),
+      fifo: [...this.fifo],
+      hasStopped: this.hasStopped,
+    };
+  }
+
+  restoreState(snapshot) {
+    super.restoreState(snapshot);
+    this.fifo = [...snapshot.fifo];
+    this.hasStopped = snapshot.hasStopped;
+  }
+}
+
+class ControlZoneControl extends BaseIntersectionControl {
+  constructor(config, map) {
+    super("control-zone", config);
+    this.scheduler = config.scheduler || "SimpleFIFO";
+    this.groups = config.entries.map((entry) => ({
+      segments: entry.segments,
+      offset: entry.initialOffset || 0,
+      finalOffset: entry.finalOffset || 0,
+      safetyTimeGap: entry.safetyTimeGap || 0,
+      length: Math.max(0, entry.segments.reduce((sum, id) => sum + map.get(id).length, 0) - (entry.initialOffset || 0) - (entry.finalOffset || 0)),
+    }));
+    this.reservations = [];
+  }
+
+  distanceToGate(vehicle, map) {
+    const match = this.matchingGroup(vehicle);
+    if (!match) return Infinity;
+    return map.get(vehicle.route[vehicle.segmentIndex]).length - vehicle.r - match.group.offset;
+  }
+
+  canGo(vehicle, runtime) {
+    const match = this.matchingGroup(vehicle);
+    if (!match) return true;
+    let reservation = this.reservations.find((item) => item.id === vehicle.id);
+    if (!reservation) {
+      const previousExit = this.reservations.length ? this.reservations[this.reservations.length - 1].exitTime : runtime.time;
+      const speed = Math.max(vehicle.pose.v, 0.05);
+      const unconstrainedExit = runtime.time + match.group.length / speed;
+      reservation = {
+        id: vehicle.id,
+        groupIndex: match.groupIndex,
+        exitTime: Math.max(unconstrainedExit, previousExit + match.group.safetyTimeGap),
+      };
+      this.reservations.push(reservation);
+    }
+    return true;
+  }
+
+  speedLimitFor(vehicle, runtime) {
+    const match = this.matchingGroup(vehicle);
+    if (!match) return vehicle.targetSpeed;
+    this.canGo(vehicle, runtime);
+    const reservation = this.reservations.find((item) => item.id === vehicle.id);
+    if (!reservation) return vehicle.targetSpeed;
+    const position = this.distanceFromEntry(vehicle, match.group, runtime.map);
+    const remainingDistance = Math.max(0, match.group.length - position);
+    const remainingTime = Math.max(MAINFRAME_DT, reservation.exitTime - runtime.time);
+    return clamp(remainingDistance / remainingTime, 0.02, vehicle.targetSpeed);
+  }
+
+  distanceFromEntry(vehicle, group, map) {
+    let distance = -group.offset;
+    for (const segmentId of group.segments) {
+      if (segmentId === vehicle.route[vehicle.segmentIndex]) {
+        return distance + vehicle.r;
+      }
+      distance += map.get(segmentId).length;
+    }
+    return 0;
+  }
+
+  removeIfPast(vehicle, runtime) {
+    if (this.matchesVehicle(vehicle)) return;
+    this.reservations = this.reservations.filter((item) => item.id !== vehicle.id);
+  }
+
+  captureState() {
+    return {
+      ...super.captureState(),
+      reservations: this.reservations.map((item) => ({ ...item })),
+    };
+  }
+
+  restoreState(snapshot) {
+    super.restoreState(snapshot);
+    this.reservations = snapshot.reservations.map((item) => ({ ...item }));
+  }
+}
+
+function randomInt(min, max) {
+  if (!Number.isFinite(min) || !Number.isFinite(max) || max < min) return 0;
+  return Math.floor(randomFloat(min, max + 1));
+}
+
+function randomFloat(min, max) {
+  if (!Number.isFinite(min) || !Number.isFinite(max) || max < min) return 0;
+  return min + Math.random() * (max - min);
+}
+
+function vehiclesOnSegments(vehicles, segments) {
+  return vehicles.filter((vehicle) => segments.includes(vehicle.route[vehicle.segmentIndex])).map((vehicle) => vehicle.id);
+}
+
+function buildIntersectionControls(experiment, map) {
+  const controls = [];
+  for (const queue of experiment?.queues || []) {
+    if (queue.segments.length) controls.push(new QueueSignControl(queue));
+  }
+  for (const yieldSign of experiment?.yields || []) {
+    if (yieldSign.segments.length) controls.push(new YieldSignControl(yieldSign));
+  }
+  for (const stop of experiment?.stops || []) {
+    if (stop.groups.length) controls.push(new StopZoneControl(stop));
+  }
+  for (const zone of experiment?.controlZones || []) {
+    if (zone.entries.length) controls.push(new ControlZoneControl(zone, map));
+  }
+  return controls;
 }
 
 function emptyCollision() {
@@ -907,7 +1627,7 @@ function drawMap(project) {
     const steps = Math.max(2, Math.ceil(segment.length / 0.04));
     const points = [];
     for (let i = 0; i <= steps; i += 1) points.push(segment.point(segment.length * i / steps));
-    drawPolyline(points, project, "#5d6b73", 3);
+    drawPolyline(points, project, "rgba(93, 107, 115, 0.28)", 2);
   }
 }
 
@@ -945,10 +1665,14 @@ function drawRouteHighlights(project) {
       const steps = Math.max(2, Math.ceil(segment.length / 0.04));
       const points = [];
       for (let i = 0; i <= steps; i += 1) points.push(segment.point(segment.length * i / steps));
-      drawPolyline(points, project, color, 12);
+      drawPolyline(points, project, color, 9);
     }
     index += 1;
   }
+}
+
+function vehicleLabel(vehicle) {
+  return `${vehicle.hardware.version}${vehicle.id}`;
 }
 
 function drawVehicle(vehicle, index, project) {
@@ -990,7 +1714,7 @@ function drawVehicle(vehicle, index, project) {
 
   ctx.font = "12px ui-sans-serif, system-ui, sans-serif";
   ctx.fillStyle = "#172026";
-  ctx.fillText(String(vehicle.id), origin.x + 9, origin.y - 9);
+  ctx.fillText(vehicleLabel(vehicle), origin.x + 9, origin.y - 9);
 }
 
 function drawEmptyMessage() {
@@ -1027,7 +1751,8 @@ function updateReadouts() {
   const count = state.runtime?.vehicles.length || 0;
   timeReadout.textContent = `${time.toFixed(2)} s`;
   vehicleReadout.textContent = `${count} vehicle${count === 1 ? "" : "s"}`;
-  timeSlider.value = Math.min(Number(timeSlider.max), time).toFixed(1);
+  if (!state.runtime) timeSlider.value = "0";
+  else if (state.playing) timeSlider.value = "1";
 }
 
 function tick(nowMs) {
@@ -1076,6 +1801,7 @@ function loadMapOnly(linesText, arcsText) {
   state.playing = false;
   state.lastTickMs = 0;
   playButton.textContent = "Play";
+  timeSlider.value = "0";
   draw();
 }
 
@@ -1093,6 +1819,7 @@ function loadRuntime(linesText, arcsText, carsText, experimentText) {
     state.playing = false;
     state.lastTickMs = 0;
     playButton.textContent = "Play";
+    timeSlider.value = "1";
     draw();
     return true;
   } catch (error) {
@@ -1161,6 +1888,10 @@ playButton.addEventListener("click", () => {
   state.playing = !state.playing;
   playButton.textContent = state.playing ? "Pause" : "Play";
   state.lastTickMs = 0;
+  if (state.playing) {
+    state.runtime.commitHistoryCursor();
+    timeSlider.value = "1";
+  }
   setCollisionStatusIfNeeded();
   if (state.playing) requestAnimationFrame(tick);
 });
@@ -1181,20 +1912,16 @@ resetButton.addEventListener("click", () => {
   state.playing = false;
   playButton.textContent = "Play";
   state.runtime.reset();
+  timeSlider.value = "1";
   setStatus(collisionStatusText() || "Simulation reset.");
   draw();
 });
 
 timeSlider.addEventListener("input", () => {
   if (!state.runtime) return;
-  const target = Number(timeSlider.value);
-  state.runtime.reset();
-  while (state.runtime.time < target) {
-    const advanced = state.runtime.step(Math.min(0.1, target - state.runtime.time));
-    if (advanced === false) break;
-  }
   state.playing = false;
   playButton.textContent = "Play";
+  state.runtime.restoreHistoryPercent(Number(timeSlider.value));
   setStatus(collisionStatusText() || "Simulation paused.");
   draw();
 });
