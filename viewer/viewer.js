@@ -1,6 +1,13 @@
 const SAMPLE_PATHS = {
   lines: "../assets/default_map/NewLines.csv",
   arcs: "../assets/default_map/NewArcs.csv",
+  background: "../assets/default_map/map.png",
+};
+
+const MAP_BACKGROUND = {
+  scale: 0.0037001616339739926,
+  dx: -3.0908133958033166,
+  dy: -4.635945144466932,
 };
 
 const HARDWARE = {
@@ -47,6 +54,15 @@ const CONTROL_DT = 1 / 50;
 const MAINFRAME_DT = 1 / 50;
 const DEFAULT_LINEUP_GAP = 0.18;
 const DEFAULT_FRONT_MARGIN = 0.04;
+const CAR_ORIGIN_REARWARD_OFFSET = 0.02;
+const ROUTE_HIGHLIGHT_COLORS = [
+  "rgba(229, 72, 77, 0.48)",
+  "rgba(46, 134, 222, 0.48)",
+  "rgba(34, 166, 99, 0.48)",
+  "rgba(245, 166, 35, 0.48)",
+  "rgba(146, 83, 191, 0.48)",
+  "rgba(28, 160, 170, 0.48)",
+];
 
 const canvas = document.querySelector("#scene");
 const ctx = canvas.getContext("2d");
@@ -72,6 +88,8 @@ const state = {
   playing: false,
   lastTickMs: 0,
   bounds: null,
+  backgroundImage: null,
+  backgroundReady: false,
   sourceTexts: {
     lines: "",
     arcs: "",
@@ -82,6 +100,19 @@ const state = {
 
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
+}
+
+function loadBackgroundImage() {
+  const image = new Image();
+  image.onload = () => {
+    state.backgroundReady = true;
+    draw();
+  };
+  image.onerror = () => {
+    state.backgroundReady = false;
+  };
+  image.src = SAMPLE_PATHS.background;
+  state.backgroundImage = image;
 }
 
 function wrapAngle(angle) {
@@ -216,8 +247,7 @@ class Segment {
   }
 
   point(r) {
-    const distance = clamp(r, 0, this.length);
-    return { x: this.xFn(distance), y: this.yFn(distance) };
+    return { x: this.xFn(r), y: this.yFn(r) };
   }
 
   tangent(r, h = 1e-3) {
@@ -235,7 +265,7 @@ class Segment {
       const p1 = this.point(1);
       const ux = p1.x - p0.x;
       const uy = p1.y - p0.y;
-      return clamp((point.x - p0.x) * ux + (point.y - p0.y) * uy, 0, this.length);
+      return (point.x - p0.x) * ux + (point.y - p0.y) * uy;
     }
 
     const start = this.point(0);
@@ -246,7 +276,7 @@ class Segment {
     let relative = Math.atan2(vx0 * vy - vy0 * vx, vx0 * vx + vy0 * vy);
     if (!this.ccw && relative < 0) relative *= -1;
     if (relative < -Math.PI / 6) relative += 2 * Math.PI;
-    return clamp(this.radius * relative, 0, this.length);
+    return this.radius * relative;
   }
 }
 
@@ -528,10 +558,11 @@ class SimVehicle {
   transitionIfNeeded(map) {
     let segment = this.currentSegment(map);
     while (this.r >= segment.length) {
-      this.r -= segment.length;
       this.segmentIndex = (this.segmentIndex + 1) % this.route.length;
+      this.r = 0.01;
       segment = this.currentSegment(map);
     }
+    this.routeDistance = routeDistanceFromIndex(map, this.route, this.segmentIndex, this.r);
   }
 }
 
@@ -633,6 +664,7 @@ class SimulationRuntime {
       vehicle.transitionIfNeeded(this.map);
     }
   }
+
 }
 
 function routeDistanceFromIndex(map, route, index, r) {
@@ -722,9 +754,14 @@ function makeProjector() {
   const offsetY = (rect.height - worldHeight * scale) / 2;
   return {
     scale,
-    point: (point) => ({
+    bounds,
+    imagePoint: (point) => ({
       x: offsetX + (point.x - bounds.minX) * scale,
       y: offsetY + (bounds.maxY - point.y) * scale,
+    }),
+    point: (point) => ({
+      x: offsetX + (bounds.maxX - point.x) * scale,
+      y: offsetY + (point.y - bounds.minY) * scale,
     }),
   };
 }
@@ -754,12 +791,53 @@ function drawMap(project) {
   }
 }
 
+function drawBackground(project) {
+  const image = state.backgroundImage;
+  if (!state.backgroundReady || !image?.naturalWidth || !image?.naturalHeight) return;
+
+  const x0 = MAP_BACKGROUND.dx;
+  const x1 = MAP_BACKGROUND.dx + MAP_BACKGROUND.scale * image.naturalWidth;
+  const y0 = MAP_BACKGROUND.dy;
+  const y1 = MAP_BACKGROUND.dy + MAP_BACKGROUND.scale * image.naturalHeight;
+  const topLeft = project.imagePoint({ x: x0, y: y1 });
+  const bottomRight = project.imagePoint({ x: x1, y: y0 });
+
+  ctx.save();
+  ctx.globalAlpha = 0.82;
+  ctx.drawImage(image, topLeft.x, topLeft.y, bottomRight.x - topLeft.x, bottomRight.y - topLeft.y);
+  ctx.restore();
+}
+
+function drawRouteHighlights(project) {
+  const runtimeVehicles = state.runtime?.vehicles || [];
+  const occupiedRoutes = new Map();
+  for (const vehicle of runtimeVehicles) {
+    if (!vehicle.route.length) continue;
+    const key = vehicle.route.join(",");
+    if (!occupiedRoutes.has(key)) occupiedRoutes.set(key, vehicle.route);
+  }
+
+  let index = 0;
+  for (const route of occupiedRoutes.values()) {
+    const color = ROUTE_HIGHLIGHT_COLORS[index % ROUTE_HIGHLIGHT_COLORS.length];
+    for (const segmentId of route) {
+      const segment = state.map.get(segmentId);
+      const steps = Math.max(2, Math.ceil(segment.length / 0.04));
+      const points = [];
+      for (let i = 0; i <= steps; i += 1) points.push(segment.point(segment.length * i / steps));
+      drawPolyline(points, project, color, 12);
+    }
+    index += 1;
+  }
+}
+
 function drawVehicle(vehicle, index, project) {
   const origin = project.point(vehicle.pose);
   const scale = project.scale;
   const length = vehicle.hardware.length * scale;
   const width = vehicle.hardware.width * scale;
-  const theta = -vehicle.pose.theta;
+  const originOffset = Math.min(CAR_ORIGIN_REARWARD_OFFSET, vehicle.hardware.length) * scale;
+  const theta = -vehicle.pose.theta + Math.PI;
 
   ctx.save();
   ctx.translate(origin.x, origin.y);
@@ -768,7 +846,7 @@ function drawVehicle(vehicle, index, project) {
   ctx.strokeStyle = "#ffffff";
   ctx.lineWidth = 1.5;
   ctx.beginPath();
-  ctx.rect(-length, -width / 2, length, width);
+  ctx.rect(-length + originOffset, -width / 2, length, width);
   ctx.fill();
   ctx.stroke();
   ctx.fillStyle = "#101820";
@@ -795,7 +873,7 @@ function drawEmptyMessage() {
   ctx.fillStyle = "#53636b";
   ctx.font = "15px ui-sans-serif, system-ui, sans-serif";
   ctx.textAlign = "center";
-  ctx.fillText("Load map CSVs, Cars.yaml, and Experiment.yaml to run the simulator.", rect.width / 2, rect.height / 2);
+  ctx.fillText("Upload Cars.yaml and Experiment.yaml to run the simulation.", rect.width / 2, rect.height / 2);
   ctx.textAlign = "start";
 }
 
@@ -812,6 +890,8 @@ function draw() {
   }
 
   const project = makeProjector();
+  drawBackground(project);
+  drawRouteHighlights(project);
   drawMap(project);
   (state.runtime?.vehicles || []).forEach((vehicle, index) => drawVehicle(vehicle, index, project));
   updateReadouts();
@@ -848,9 +928,9 @@ async function loadSample() {
     ]);
     state.sourceTexts = { lines: linesText, arcs: arcsText, cars: "", experiment: "" };
     loadMapOnly(linesText, arcsText);
-    setStatus("Default map loaded. Upload Cars.yaml and Experiment.yaml to run.");
+    setStatus("Map loaded. Upload Cars.yaml and Experiment.yaml to start.");
   } catch (error) {
-    showError("The default map could not be loaded. Start a local web server from the project root, or upload both map CSV files manually.");
+    showError("Could not load the default map. Start a local web server from the project root, or upload both map CSV files.");
     console.warn(error);
     draw();
   }
@@ -875,7 +955,7 @@ function loadRuntime(linesText, arcsText, carsText, experimentText) {
     state.map.load(linesText, arcsText);
     state.scenario = parseCarsYaml(carsText);
     if (!state.scenario.vehicles.length) {
-      throw new Error("Cars.yaml did not contain any autonomous vehicles with valid routes.");
+      throw new Error("Cars.yaml does not include any autonomous vehicles with valid routes.");
     }
     state.experiment = parseExperimentYaml(experimentText || "");
     state.runtime = new SimulationRuntime(state.map, state.scenario);
@@ -888,7 +968,7 @@ function loadRuntime(linesText, arcsText, carsText, experimentText) {
   } catch (error) {
     state.runtime = null;
     draw();
-    showError(`The uploaded experiment could not be loaded. ${error.message}`);
+    showError(`Could not load this experiment. ${error.message}`);
     console.error(error);
     return false;
   }
@@ -897,6 +977,17 @@ function loadRuntime(linesText, arcsText, carsText, experimentText) {
 async function readUploadedFile(input) {
   const file = input.files?.[0];
   return file ? file.text() : null;
+}
+
+function missingRuntimeMessage(action) {
+  if (!state.sourceTexts.lines || !state.sourceTexts.arcs) {
+    return `Upload both map CSV files before using ${action}.`;
+  }
+  const missing = [];
+  if (!state.sourceTexts.cars) missing.push("Cars.yaml");
+  if (!state.sourceTexts.experiment) missing.push("Experiment.yaml");
+  if (missing.length) return `Upload ${missing.join(" and ")} before using ${action}.`;
+  return "Load a valid experiment before using the playback controls.";
 }
 
 async function refreshFromUploads() {
@@ -915,24 +1006,26 @@ async function refreshFromUploads() {
   };
 
   if (!state.sourceTexts.lines || !state.sourceTexts.arcs) {
-    showError("The simulator needs both Lines CSV and Arcs CSV. The default map did not load, so please upload both map files.");
+    setStatus("Upload both map CSV files to replace the default map.");
     return;
   }
 
   if (!state.sourceTexts.cars || !state.sourceTexts.experiment) {
     loadMapOnly(state.sourceTexts.lines, state.sourceTexts.arcs);
-    showError("Please upload both Cars.yaml and Experiment.yaml before running the simulation.");
+    if (state.sourceTexts.cars) setStatus("Cars.yaml loaded. Upload Experiment.yaml to start.");
+    else if (state.sourceTexts.experiment) setStatus("Experiment.yaml loaded. Upload Cars.yaml to start.");
+    else setStatus("Map loaded. Upload Cars.yaml and Experiment.yaml to start.");
     return;
   }
 
   if (loadRuntime(state.sourceTexts.lines, state.sourceTexts.arcs, state.sourceTexts.cars, state.sourceTexts.experiment)) {
-    setStatus("Uploaded live simulation loaded.");
+    setStatus("Simulation ready.");
   }
 }
 
 playButton.addEventListener("click", () => {
   if (!state.runtime) {
-    showError("Please upload both Cars.yaml and Experiment.yaml before pressing Play.");
+    showError(missingRuntimeMessage("Play"));
     return;
   }
   state.playing = !state.playing;
@@ -950,9 +1043,13 @@ window.addEventListener("keydown", (event) => {
 });
 
 resetButton.addEventListener("click", () => {
+  if (!state.runtime) {
+    showError(missingRuntimeMessage("Reset"));
+    return;
+  }
   state.playing = false;
   playButton.textContent = "Play";
-  state.runtime?.reset();
+  state.runtime.reset();
   draw();
 });
 
@@ -971,4 +1068,5 @@ for (const input of [linesInput, arcsInput, carsInput, experimentInput]) {
 }
 
 window.addEventListener("resize", draw);
+loadBackgroundImage();
 loadSample();

@@ -1,6 +1,7 @@
 # ScaledCity Simulator
 
 This is an unfinished simulator for Cornell IDS Lab's scaled smart city.
+To use it, simply visit https://cmdhl.github.io/IDS3C_Web_Simulator/viewer/
 
 ## Build locally
 

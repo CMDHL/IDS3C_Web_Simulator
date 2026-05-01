@@ -143,6 +143,11 @@ input[type="range"] {
   gap: 5px;
 }
 
+.required-file > span > span {
+  color: #c82127;
+  font-weight: 700;
+}
+
 input[type="file"] {
   max-width: 100%;
   min-height: 36px;

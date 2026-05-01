@@ -8,14 +8,6 @@
   </head>
   <body>
     <main class="app-shell">
-      <header class="topbar">
-        <p id="status">Loading default map...</p>
-        <div class="stats" aria-live="polite">
-          <span id="timeReadout">0.00 s</span>
-          <span id="vehicleReadout">0 vehicles</span>
-        </div>
-      </header>
-
       <section class="controls" aria-label="Playback and file controls">
         <div class="transport">
           <button id="playButton" type="button">Play</button>
@@ -32,6 +24,14 @@
         </div>
 
         <div class="file-grid">
+          <label class="required-file">
+            <span><span aria-hidden="true">*</span> Cars.yaml</span>
+            <input id="carsInput" type="file" accept=".yaml,.yml,text/yaml,text/plain">
+          </label>
+          <label class="required-file">
+            <span><span aria-hidden="true">*</span> Experiment.yaml</span>
+            <input id="experimentInput" type="file" accept=".yaml,.yml,text/yaml,text/plain">
+          </label>
           <label>
             Lines CSV
             <input id="linesInput" type="file" accept=".csv,text/csv">
@@ -40,16 +40,16 @@
             Arcs CSV
             <input id="arcsInput" type="file" accept=".csv,text/csv">
           </label>
-          <label>
-            Cars.yaml
-            <input id="carsInput" type="file" accept=".yaml,.yml,text/yaml,text/plain">
-          </label>
-          <label>
-            Experiment.yaml
-            <input id="experimentInput" type="file" accept=".yaml,.yml,text/yaml,text/plain">
-          </label>
         </div>
       </section>
+
+      <header class="topbar">
+        <p id="status">Loading default map...</p>
+        <div class="stats" aria-live="polite">
+          <span id="timeReadout">0.00 s</span>
+          <span id="vehicleReadout">0 vehicles</span>
+        </div>
+      </header>
 
       <section class="viewport" aria-label="Simulation viewport">
         <canvas id="scene" width="1200" height="760"></canvas>
@@ -58,7 +58,7 @@
 
     <div id="errorDialog" class="modal" role="dialog" aria-modal="true" aria-labelledby="errorTitle" hidden>
       <div class="modal-panel">
-        <h2 id="errorTitle">Cannot run simulation</h2>
+        <h2 id="errorTitle">Simulation not ready</h2>
         <p id="errorMessage"></p>
         <button id="errorCloseButton" type="button">OK</button>
       </div>
