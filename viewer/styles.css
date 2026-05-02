@@ -25,41 +25,55 @@ select {
 
 .app-shell {
   display: grid;
-  grid-template-rows: auto auto auto;
-  gap: 14px;
+  grid-template-columns: minmax(0, 1fr) minmax(250px, 300px);
+  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-areas:
+    "viewport controls"
+    "viewport status";
+  gap: 12px;
   min-height: 100vh;
-  padding: 18px;
+  padding: 12px;
 }
 
 .topbar,
 .controls {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  padding: 14px 16px;
+  align-items: stretch;
+  justify-content: flex-start;
+  gap: 10px;
+  padding: 10px;
   border: 1px solid #d8d1c4;
   border-radius: 8px;
   background: rgba(255, 255, 255, 0.78);
+}
+
+.controls {
+  grid-area: controls;
+  flex-direction: column;
+}
+
+.topbar {
+  grid-area: status;
+  flex-direction: column;
+  align-self: start;
 }
 
 p {
   margin: 0;
   color: #617079;
   font-size: 13px;
+  line-height: 1.35;
 }
 
 .stats {
-  display: flex;
-  align-items: center;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
   gap: 8px;
-  flex-wrap: wrap;
-  justify-content: flex-end;
 }
 
 .stats span {
-  min-width: 88px;
-  padding: 7px 10px;
+  min-width: 0;
+  padding: 6px 8px;
   border: 1px solid #cfd8dc;
   border-radius: 6px;
   background: #eef6f7;
@@ -70,10 +84,11 @@ p {
 }
 
 .viewport {
-  align-self: start;
-  justify-self: center;
-  width: min(100%, 1040px);
-  height: clamp(360px, 62vh, 620px);
+  grid-area: viewport;
+  min-width: 0;
+  min-height: 0;
+  width: 100%;
+  height: calc(100vh - 24px);
   border: 1px solid #cbd5d8;
   border-radius: 8px;
   overflow: hidden;
@@ -86,21 +101,25 @@ canvas {
   height: 100%;
 }
 
-.controls {
-  align-items: stretch;
-}
-
 .transport {
   display: grid;
-  grid-template-columns: auto auto auto minmax(180px, 1fr) auto auto;
+  grid-template-columns: 1fr 1fr;
   align-items: center;
-  gap: 10px;
-  min-width: min(620px, 100%);
+  gap: 8px;
+}
+
+.transport .slider-label,
+.transport input[type="range"] {
+  grid-column: 1 / -1;
+}
+
+.transport .speed-label {
+  justify-self: start;
 }
 
 button,
 select {
-  min-height: 36px;
+  min-height: 32px;
   border: 1px solid #98a8ae;
   border-radius: 6px;
   background: #ffffff;
@@ -108,7 +127,7 @@ select {
 }
 
 button {
-  padding: 0 14px;
+  padding: 0 10px;
   cursor: pointer;
 }
 
@@ -135,10 +154,9 @@ input[type="range"] {
 
 .file-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(120px, 1fr));
-  gap: 10px;
+  grid-template-columns: 1fr;
+  gap: 8px;
   align-items: end;
-  max-width: 620px;
 }
 
 .file-grid label {
@@ -153,8 +171,8 @@ input[type="range"] {
 
 input[type="file"] {
   max-width: 100%;
-  min-height: 36px;
-  padding: 6px;
+  min-height: 32px;
+  padding: 5px;
   border: 1px solid #c3ccd0;
   border-radius: 6px;
   background: #ffffff;
@@ -197,15 +215,26 @@ input[type="file"] {
 }
 
 @media (max-width: 900px) {
+  .app-shell {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto auto auto;
+    grid-template-areas:
+      "controls"
+      "status"
+      "viewport";
+  }
+
   .topbar,
   .controls {
-    flex-direction: column;
     align-items: stretch;
   }
 
-  .transport,
+  .viewport {
+    height: clamp(340px, 62vh, 620px);
+  }
+
   .file-grid {
-    max-width: none;
+    grid-template-columns: repeat(2, minmax(120px, 1fr));
   }
 }
 
@@ -228,6 +257,10 @@ input[type="file"] {
   }
 
   .file-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .stats {
     grid-template-columns: 1fr;
   }
 }
