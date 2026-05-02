@@ -66,6 +66,7 @@ const HDV_ID = -1;
 const HDV_SPEED_MIN = -1;
 const HDV_SPEED_MAX = 1;
 const HDV_SPEED_RATE = 0.8;
+const HDV_OVERLAP_DISTANCE = 0.1;
 const DEFAULT_IDM = {
   s0: 0.1,
   a: 10.0,
@@ -103,7 +104,7 @@ const errorCloseButton = document.querySelector("#errorCloseButton");
 
 const state = {
   map: null,
-  scenario: { vehicles: [] },
+  scenario: { vehicles: [], humanVehicles: [] },
   runtime: null,
   playing: false,
   lastTickMs: 0,
@@ -329,6 +330,7 @@ function parseCarsYaml(text) {
   const root = parseSimpleYaml(text);
   const anchorPaths = new Map();
   const vehicles = [];
+  const humanVehicles = [];
   const seenIds = new Map();
 
   for (const child of root.order) {
@@ -391,6 +393,7 @@ function parseCarsYaml(text) {
     for (const controllerName of speedNodes) {
       const controllerNode = node.child(controllerName);
       if (!controllerNode) continue;
+      if (controllerNode.value === "HDV") vehicle.mode = "HDV";
       const speed = parseOptionalYamlNumber(controllerNode, "speed");
       if (speed !== null) {
         vehicle.speed = speed;
@@ -405,10 +408,15 @@ function parseCarsYaml(text) {
     if (!vehicle.route.length && vehicle.pathType !== "HDV") {
       throw new Error(`${node.key} does not include any route segments.`);
     }
-    if (vehicle.route.length) vehicles.push(vehicle);
+    if (vehicle.pathType === "HDV" || vehicle.mode === "HDV") {
+      vehicle.mode = "HDV";
+      humanVehicles.push(vehicle);
+    } else if (vehicle.route.length) {
+      vehicles.push(vehicle);
+    }
   }
 
-  return { vehicles };
+  return { vehicles, humanVehicles };
 }
 
 function parseExperimentYaml(text) {
@@ -641,16 +649,72 @@ function hardwareFor(config) {
   return { ...HARDWARE[family].default, version: family };
 }
 
-function selectedHdvVersion() {
-  return HARDWARE[hdvVersionSelect?.value] ? hdvVersionSelect.value : "manta";
+function defaultHdvTemplates() {
+  return [
+    { id: HDV_ID, key: "HumanDrivenVehicle", version: "lotus", label: "lotus", source: "default", listedHdv: false },
+    { id: HDV_ID, key: "HumanDrivenVehicle", version: "manta", label: "manta", source: "default", listedHdv: false },
+  ];
 }
 
-function humanVehicleConfig(version = selectedHdvVersion(), segmentId = "") {
+function scenarioHdvTemplates() {
+  return (state.scenario?.humanVehicles || []).map((vehicle) => {
+    const version = (vehicle.version || "manta").toLowerCase();
+    return {
+      ...vehicle,
+      version,
+      label: `${version}_${vehicle.id}`,
+      source: "yaml",
+      listedHdv: true,
+    };
+  });
+}
+
+function hdvTemplates() {
+  return [...scenarioHdvTemplates(), ...defaultHdvTemplates()];
+}
+
+function selectedHdvTemplate() {
+  const selected = hdvVersionSelect?.value || "default:manta";
+  const match = hdvTemplates().find((template) => hdvTemplateValue(template) === selected);
+  return match || defaultHdvTemplates()[1];
+}
+
+function selectedHdvVersion() {
+  return selectedHdvTemplate().version;
+}
+
+function hdvTemplateValue(template) {
+  return template.source === "yaml" ? `yaml:${template.id}` : `default:${template.version}`;
+}
+
+function refreshHdvOptions(preferScenarioHdv = false) {
+  const previous = hdvVersionSelect.value;
+  const templates = hdvTemplates();
+  hdvVersionSelect.replaceChildren(...templates.map((template) => {
+    const option = document.createElement("option");
+    option.value = hdvTemplateValue(template);
+    option.textContent = template.label;
+    return option;
+  }));
+  const scenarioTemplates = scenarioHdvTemplates();
+  const nextValue = preferScenarioHdv && scenarioTemplates.length
+    ? hdvTemplateValue(scenarioTemplates[0])
+    : templates.some((template) => hdvTemplateValue(template) === previous)
+    ? previous
+    : "default:manta";
+  hdvVersionSelect.value = nextValue;
+}
+
+function humanVehicleConfig(template = selectedHdvTemplate(), segmentId = "") {
+  if (typeof template === "string") template = { id: HDV_ID, key: "HumanDrivenVehicle", version: template };
   return {
-    id: HDV_ID,
-    key: "HumanDrivenVehicle",
-    version,
+    id: template.id ?? HDV_ID,
+    key: template.key || "HumanDrivenVehicle",
+    version: template.version || "manta",
     mode: "HDV",
+    listedHdv: Boolean(template.listedHdv),
+    label: template.label || "",
+    source: template.source || "default",
     controller: "Human",
     controllers: [],
     switchSegments: [],
@@ -956,6 +1020,9 @@ class SimVehicle {
       id: this.id,
       version: this.config.version,
       mode: this.config.mode,
+      listedHdv: Boolean(this.config.listedHdv),
+      label: this.config.label || "",
+      source: this.config.source || "",
       route: [...this.route],
       routeDistance: this.routeDistance,
       segmentIndex: this.segmentIndex,
@@ -995,6 +1062,17 @@ class SimVehicle {
       controller.targetSpeed = clamp(velocityTarget, HDV_SPEED_MIN, HDV_SPEED_MAX);
       this.controller = controller;
     }
+  }
+
+  applyHumanTemplate(template) {
+    if (this.config.mode !== "HDV") return;
+    this.id = template.id ?? HDV_ID;
+    this.config.id = this.id;
+    this.config.key = template.key || this.config.key || "HumanDrivenVehicle";
+    this.config.listedHdv = Boolean(template.listedHdv);
+    this.config.label = template.label || "";
+    this.config.source = template.source || "default";
+    this.setHardwareVersion(template.version || "manta");
   }
 }
 
@@ -1041,21 +1119,22 @@ class SimulationRuntime {
   }
 
   placeHumanVehicle(segment, r, version = selectedHdvVersion()) {
+    const template = typeof version === "string" ? { ...selectedHdvTemplate(), version } : version;
     const existing = this.humanVehicle();
     if (existing) {
+      existing.applyHumanTemplate(template);
       existing.config.route = [segment.id];
       existing.route = [segment.id];
       existing.routeDistance = r;
       existing.r = r;
       existing.segmentIndex = 0;
-      existing.setHardwareVersion(version);
       existing.syncRoutePosition(this.map);
       existing.pose.v = 0;
       existing.pose.yawRate = 0;
       existing.controller.targetSpeed = 0;
       existing.desired = { x: existing.pose.x, y: existing.pose.y };
     } else {
-      this.vehicles.push(new SimVehicle(humanVehicleConfig(version, segment.id), this.map, r));
+      this.vehicles.push(new SimVehicle(humanVehicleConfig(template, segment.id), this.map, r));
     }
     this.updateCollisionState();
     this.recordHistory();
@@ -1073,7 +1152,7 @@ class SimulationRuntime {
   setHumanVehicleVersion(version) {
     const vehicle = this.humanVehicle();
     if (!vehicle) return;
-    vehicle.setHardwareVersion(version);
+    vehicle.applyHumanTemplate({ ...selectedHdvTemplate(), version });
     this.updateCollisionState();
     this.recordHistory();
   }
@@ -1232,7 +1311,10 @@ class SimulationRuntime {
       vehicle.pose.v = vehicle.config.mode === "HDV"
         ? clamp(vehicle.pose.v + dv, HDV_SPEED_MIN, HDV_SPEED_MAX)
         : Math.max(0, vehicle.pose.v + dv);
-      const steering = control.steeringDeg * Math.PI / 180;
+      const steeringDeg = vehicle.config.mode === "HDV" && vehicle.pose.v < -1e-4
+        ? -control.steeringDeg
+        : control.steeringDeg;
+      const steering = steeringDeg * Math.PI / 180;
       vehicle.pose.yawRate = vehicle.pose.v / vehicle.hardware.wheelbase * Math.tan(steering);
       vehicle.pose.theta = wrapAngle(vehicle.pose.theta + vehicle.pose.yawRate * dt);
       vehicle.pose.x += vehicle.pose.v * Math.cos(vehicle.pose.theta) * dt;
@@ -1295,8 +1377,15 @@ class SimulationRuntime {
       const vehicle = this.vehicles.find((item) => item.id === vehicleState.id);
       if (vehicle) {
         vehicle.restoreState(vehicleState, this.map);
-      } else if (vehicleState.id === HDV_ID && vehicleState.route?.length) {
-        const hdv = new SimVehicle(humanVehicleConfig(vehicleState.version || selectedHdvVersion(), vehicleState.route[0]), this.map, vehicleState.r || 0);
+      } else if (vehicleState.mode === "HDV" && vehicleState.route?.length) {
+        const hdv = new SimVehicle(humanVehicleConfig({
+          id: vehicleState.id,
+          key: "HumanDrivenVehicle",
+          version: vehicleState.version || selectedHdvVersion(),
+          listedHdv: Boolean(vehicleState.listedHdv),
+          label: vehicleState.label || "",
+          source: vehicleState.source || "default",
+        }, vehicleState.route[0]), this.map, vehicleState.r || 0);
         hdv.restoreState(vehicleState, this.map);
         this.vehicles.push(hdv);
       }
@@ -1405,7 +1494,7 @@ class QueueSignControl extends BaseIntersectionControl {
   }
 
   update(runtime) {
-    this.currentOccupants = vehiclesOnSegments(runtime.vehicles, [...this.groups[0].segments, ...this.backupSegments]);
+    this.currentOccupants = vehiclesOnSegments(runtime.vehicles, [...this.groups[0].segments, ...this.backupSegments], runtime.map);
     const enteredNow = this.currentOccupants.some((id) => !this.pastOccupants.includes(id));
     this.isBack = enteredNow;
     for (const id of this.pastOccupants) {
@@ -1473,7 +1562,8 @@ class YieldSignControl extends BaseIntersectionControl {
       const segmentId = this.config.yieldTo[i];
       const offset = this.config.offsets[i] || 0;
       for (const other of runtime.vehicles) {
-        if (other.id !== vehicle.id && other.route[other.segmentIndex] === segmentId && other.r >= offset) return false;
+        if (other.id === vehicle.id) continue;
+        if (vehicleOccupiesSegment(other, segmentId, runtime.map, offset)) return false;
       }
     }
     return true;
@@ -1492,7 +1582,7 @@ class StopZoneControl extends BaseIntersectionControl {
     let frontFound = false;
     const zoneSegments = this.groups.flatMap((group) => group.segments);
     for (const vehicle of runtime.vehicles) {
-      if (!zoneSegments.includes(vehicle.route[vehicle.segmentIndex])) continue;
+      if (!vehicleOccupiesAnySegment(vehicle, zoneSegments, runtime.map)) continue;
       if (!this.fifo.includes(vehicle.id)) {
         this.fifo.push(vehicle.id);
         if (this.fifo.length === 1) frontFound = true;
@@ -1511,7 +1601,7 @@ class StopZoneControl extends BaseIntersectionControl {
     this.hasStopped = this.hasStopped || vehicle.pose.v < 0.02;
     let conflictCount = 0;
     for (const other of runtime.vehicles) {
-      if (other.id !== vehicle.id && this.config.conflictSegments.includes(other.route[other.segmentIndex])) conflictCount += 1;
+      if (other.id !== vehicle.id && vehicleOccupiesAnySegment(other, this.config.conflictSegments, runtime.map)) conflictCount += 1;
     }
     return this.hasStopped && conflictCount === 0;
   }
@@ -1620,8 +1710,32 @@ function randomFloat(min, max) {
   return min + Math.random() * (max - min);
 }
 
-function vehiclesOnSegments(vehicles, segments) {
-  return vehicles.filter((vehicle) => segments.includes(vehicle.route[vehicle.segmentIndex])).map((vehicle) => vehicle.id);
+function vehiclesOnSegments(vehicles, segments, map) {
+  return vehicles.filter((vehicle) => vehicleOccupiesAnySegment(vehicle, segments, map)).map((vehicle) => vehicle.id);
+}
+
+function vehicleOccupiesAnySegment(vehicle, segments, map) {
+  return vehicleSegmentOccupancies(vehicle, map).some((occupancy) => segments.includes(occupancy.id));
+}
+
+function vehicleOccupiesSegment(vehicle, segmentId, map, minR = -Infinity) {
+  return vehicleSegmentOccupancies(vehicle, map).some((occupancy) => occupancy.id === segmentId && occupancy.r >= minR);
+}
+
+function vehicleSegmentOccupancies(vehicle, map) {
+  if (!vehicle.route.length) return [];
+  const currentSegmentId = vehicle.route[vehicle.segmentIndex];
+  if (vehicle.config.mode !== "HDV") return [{ id: currentSegmentId, r: vehicle.r }];
+  if (!vehicle.config.listedHdv) return [];
+
+  const occupancies = [];
+  for (const segment of map.all()) {
+    const closest = closestPointOnSegment(segment, vehicle.pose);
+    if (closest.distance <= HDV_OVERLAP_DISTANCE || segment.id === currentSegmentId) {
+      occupancies.push({ id: segment.id, r: closest.r, distance: closest.distance });
+    }
+  }
+  return occupancies;
 }
 
 function buildIntersectionControls(experiment, map) {
@@ -1724,12 +1838,41 @@ function findLeader(vehicle, vehicles, map) {
   const routeLength = map.routeLength(vehicle.route);
   let best = { distance: 999, velocity: vehicle.targetSpeed };
   for (const other of vehicles) {
-    if (other === vehicle || !sameRoute(vehicle, other)) continue;
-    let distance = other.routeDistance - vehicle.routeDistance;
-    if (distance <= 0) distance += routeLength;
+    if (other === vehicle || !other.route.length) continue;
+    if (other.config.mode === "HDV" && !other.config.listedHdv) continue;
+    const distance = distanceAheadOnRoute(vehicle, other, map, routeLength);
+    if (distance === null) continue;
     if (distance < best.distance) best = { distance, velocity: other.pose.v };
   }
   return best;
+}
+
+function distanceAheadOnRoute(vehicle, other, map, routeLength = map.routeLength(vehicle.route)) {
+  if (sameRoute(vehicle, other)) {
+    let distance = other.routeDistance - vehicle.routeDistance;
+    if (distance <= 0) distance += routeLength;
+    return distance;
+  }
+
+  const currentSegmentId = vehicle.route[vehicle.segmentIndex];
+  const otherOccupancies = vehicleSegmentOccupancies(other, map);
+  const sameSegment = otherOccupancies
+    .filter((occupancy) => occupancy.id === currentSegmentId && occupancy.r > vehicle.r)
+    .sort((a, b) => a.r - b.r)[0];
+  if (sameSegment) return sameSegment.r - vehicle.r;
+
+  let distance = map.get(currentSegmentId).length - vehicle.r;
+  for (let offset = 1; offset < vehicle.route.length; offset += 1) {
+    const index = (vehicle.segmentIndex + offset) % vehicle.route.length;
+    const segmentId = vehicle.route[index];
+    const occupancy = otherOccupancies
+      .filter((item) => item.id === segmentId)
+      .sort((a, b) => a.r - b.r)[0];
+    if (occupancy) return distance + occupancy.r;
+    distance += map.get(segmentId).length;
+    if (distance > routeLength) break;
+  }
+  return null;
 }
 
 function vehicleCollisionRect(vehicle) {
@@ -2013,8 +2156,8 @@ function drawRouteHighlights(project) {
 }
 
 function vehicleLabel(vehicle) {
-  if (vehicle.config.mode === "HDV") return "HDV";
-  return `${vehicle.hardware.version}${vehicle.id}`;
+  if (vehicle.config.mode === "HDV" && !vehicle.config.listedHdv) return "HDV";
+  return `${vehicle.hardware.version}_${vehicle.id}`;
 }
 
 function vehicleLabelById(id) {
@@ -2062,7 +2205,7 @@ function drawVehicle(vehicle, index, project) {
     ctx.stroke();
   }
 
-  if (!isHdv) {
+  if (!isHdv || vehicle.config.listedHdv) {
     ctx.font = "13px ui-sans-serif, system-ui, sans-serif";
     ctx.fillStyle = "#172026";
     ctx.fillText(vehicleLabel(vehicle), origin.x + 9, origin.y - 9);
@@ -2070,16 +2213,21 @@ function drawVehicle(vehicle, index, project) {
 }
 
 function drawHdvSteeringCue(vehicle, project) {
+  const speed = vehicle.pose.v || 0;
+  const speedRatio = clamp(Math.abs(speed) / HDV_SPEED_MAX, 0, 1);
+  if (speedRatio <= 0.001) return;
   const steeringDeg = vehicle.control?.steeringDeg || vehicle.controller?.steeringDeg || 0;
-  const angle = vehicle.pose.theta + steeringDeg * Math.PI / 180;
-  const cueLength = Math.max(0.12, vehicle.hardware.length * 0.9);
+  const steeringCueAngle = vehicle.pose.theta + steeringDeg * Math.PI / 180;
+  const angle = speed >= 0 ? steeringCueAngle : wrapAngle(steeringCueAngle + Math.PI);
+  const maxCueLength = Math.max(0.12, vehicle.hardware.length * 0.9);
+  const cueLength = maxCueLength * speedRatio;
   const start = project.point(vehicle.pose);
   const end = project.point({
     x: vehicle.pose.x + cueLength * Math.cos(angle),
     y: vehicle.pose.y + cueLength * Math.sin(angle),
   });
   const arrowAngle = Math.atan2(end.y - start.y, end.x - start.x);
-  const head = Math.max(5, 0.032 * project.scale);
+  const head = Math.min(Math.max(4, 0.032 * project.scale), Math.max(4, cueLength * project.scale * 0.45));
 
   ctx.save();
   ctx.strokeStyle = "#0b4f8a";
@@ -2158,7 +2306,7 @@ function updateHdvPanel() {
   } else if (vehicle) {
     placeHdvButton.textContent = "Remove";
   } else {
-    placeHdvButton.textContent = "Add";
+    placeHdvButton.textContent = "Place";
   }
 }
 
@@ -2179,10 +2327,10 @@ function placeHumanVehicleAt(point) {
   if (!ensureRuntimeForHdv()) return;
   const match = closestMapSegment(point);
   if (!match) return;
-  state.runtime.placeHumanVehicle(match.segment, match.r, selectedHdvVersion());
+  const template = selectedHdvTemplate();
+  state.runtime.placeHumanVehicle(match.segment, match.r, template);
   setHdvPlacing(false);
-  const version = selectedHdvVersion();
-  setStatus(`${version[0].toUpperCase() + version.slice(1)} placed.`);
+  setStatus(`${template.label} placed.`);
   draw();
 }
 
@@ -2225,7 +2373,7 @@ async function loadSample() {
 function loadMapOnly(linesText, arcsText) {
   state.map = new RoadMap();
   state.map.load(linesText, arcsText);
-  state.scenario = { vehicles: [] };
+  state.scenario = { vehicles: [], humanVehicles: [] };
   state.experiment = null;
   state.runtime = null;
   state.bounds = computeBounds();
@@ -2234,6 +2382,7 @@ function loadMapOnly(linesText, arcsText) {
   playButton.textContent = "Play";
   timeSlider.value = "0";
   setHdvPlacing(false);
+  refreshHdvOptions();
   draw();
 }
 
@@ -2242,6 +2391,7 @@ function loadRuntime(linesText, arcsText, carsText, experimentText) {
     state.map = new RoadMap();
     state.map.load(linesText, arcsText);
     state.scenario = parseCarsYaml(carsText);
+    refreshHdvOptions(true);
     if (!state.scenario.vehicles.length) {
       throw new Error("Cars.yaml does not include any autonomous vehicles with valid routes.");
     }
@@ -2340,8 +2490,7 @@ hdvVersionSelect.addEventListener("change", () => {
   state.runtime?.setHumanVehicleVersion(state.hdv.version);
   const vehicle = state.runtime?.humanVehicle?.();
   if (vehicle) {
-    const version = vehicle.hardware.version;
-    setStatus(`${version[0].toUpperCase() + version.slice(1)} placed.`);
+    setStatus(`${selectedHdvTemplate().label} placed.`);
   }
   draw();
 });
@@ -2432,5 +2581,6 @@ for (const input of [linesInput, arcsInput, carsInput, experimentInput]) {
 }
 
 window.addEventListener("resize", draw);
+refreshHdvOptions();
 loadBackgroundImage();
 loadSample();
