@@ -3,26 +3,12 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>ScaledCity Simulator</title>
+    <title>IDS3C Simulator</title>
     <link rel="stylesheet" href="styles.css">
   </head>
   <body>
     <main class="app-shell">
       <section class="controls" aria-label="Playback and file controls">
-        <div class="transport">
-          <button id="playButton" type="button">Play</button>
-          <button id="resetButton" type="button">Reset</button>
-          <label class="slider-label" for="timeSlider">Time</label>
-          <input id="timeSlider" type="range" min="0" max="1" value="0" step="0.001">
-          <label class="speed-label" for="speedSelect">Speed</label>
-          <select id="speedSelect">
-            <option value="0.5">0.5x</option>
-            <option value="1" selected>1x</option>
-            <option value="2">2x</option>
-            <option value="4">4x</option>
-          </select>
-        </div>
-
         <div class="file-grid">
           <label class="required-file">
             <span><span aria-hidden="true">*</span> Cars.yaml</span>
@@ -41,14 +27,38 @@
             <input id="arcsInput" type="file" accept=".csv,text/csv">
           </label>
         </div>
+
+        <div class="hdv-panel" aria-label="Human-Driven Vehicle controls">
+          <h2>Human-Driven Vehicle</h2>
+          <select id="hdvVersionSelect" aria-label="Human-driven vehicle type">
+            <option value="lotus">Lotus</option>
+            <option value="manta" selected>Manta</option>
+          </select>
+          <button id="placeHdvButton" type="button">Add</button>
+          <p class="hdv-instructions">Press W/S to change speed; move mouse to lead the way; press SPACE to brake.</p>
+        </div>
+
+        <div class="transport">
+          <button id="playButton" type="button">Play</button>
+          <button id="resetButton" type="button">Reset</button>
+          <label class="slider-label" for="timeSlider">Time</label>
+          <input id="timeSlider" type="range" min="0" max="1" value="0" step="0.001">
+          <label class="speed-label" for="speedSelect">Speed</label>
+          <select id="speedSelect">
+            <option value="0.5">0.5x</option>
+            <option value="1" selected>1x</option>
+            <option value="2">2x</option>
+            <option value="4">4x</option>
+          </select>
+        </div>
       </section>
 
       <header class="topbar">
-        <p id="status">Loading default map...</p>
         <div class="stats" aria-live="polite">
           <span id="timeReadout">0.00 s</span>
-          <span id="vehicleReadout">0 vehicles</span>
+          <span id="vehicleReadout">HDV -- m/s</span>
         </div>
+        <p id="status">Loading default map...</p>
       </header>
 
       <section class="viewport" aria-label="Simulation viewport">

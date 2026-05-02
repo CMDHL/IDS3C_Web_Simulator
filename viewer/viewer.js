@@ -62,6 +62,10 @@ const CAR_ORIGIN_REARWARD_OFFSET = 0.02;
 const COLLISION_CELL_SIZE = 0.35;
 const INTERSECTION_QUEUE_DISTANCE = 0.20;
 const CONTROL_ZONE_CAR_LENGTH_ALLOWANCE = 0.1;
+const HDV_ID = -1;
+const HDV_SPEED_MIN = -1;
+const HDV_SPEED_MAX = 1;
+const HDV_SPEED_RATE = 0.8;
 const DEFAULT_IDM = {
   s0: 0.1,
   a: 10.0,
@@ -91,6 +95,8 @@ const linesInput = document.querySelector("#linesInput");
 const arcsInput = document.querySelector("#arcsInput");
 const carsInput = document.querySelector("#carsInput");
 const experimentInput = document.querySelector("#experimentInput");
+const hdvVersionSelect = document.querySelector("#hdvVersionSelect");
+const placeHdvButton = document.querySelector("#placeHdvButton");
 const errorDialog = document.querySelector("#errorDialog");
 const errorMessage = document.querySelector("#errorMessage");
 const errorCloseButton = document.querySelector("#errorCloseButton");
@@ -109,6 +115,16 @@ const state = {
     arcs: "",
     cars: "",
     experiment: "",
+  },
+  hdv: {
+    placing: false,
+    version: "manta",
+    mouseWorld: null,
+    keys: {
+      w: false,
+      s: false,
+      brake: false,
+    },
   },
 };
 
@@ -625,6 +641,26 @@ function hardwareFor(config) {
   return { ...HARDWARE[family].default, version: family };
 }
 
+function selectedHdvVersion() {
+  return HARDWARE[hdvVersionSelect?.value] ? hdvVersionSelect.value : "manta";
+}
+
+function humanVehicleConfig(version = selectedHdvVersion(), segmentId = "") {
+  return {
+    id: HDV_ID,
+    key: "HumanDrivenVehicle",
+    version,
+    mode: "HDV",
+    controller: "Human",
+    controllers: [],
+    switchSegments: [],
+    speed: 0,
+    idm: { ...DEFAULT_IDM },
+    route: segmentId ? [segmentId] : [],
+    pathType: "HDV",
+  };
+}
+
 class CarPathController {
   constructor(hardware) {
     this.hardware = hardware;
@@ -804,13 +840,64 @@ function interpolateProfile(times = [], speeds = [], t) {
   return speeds[0] || 0;
 }
 
+class HumanDrivenController {
+  constructor(hardware) {
+    this.hardware = hardware;
+    this.targetSpeed = 0;
+    this.steeringDeg = 0;
+  }
+
+  initialize() {}
+
+  captureState() {
+    return {
+      targetSpeed: this.targetSpeed,
+      steeringDeg: this.steeringDeg,
+    };
+  }
+
+  restoreState(snapshot = {}) {
+    this.targetSpeed = clamp(snapshot.targetSpeed || 0, HDV_SPEED_MIN, HDV_SPEED_MAX);
+    this.steeringDeg = clamp(snapshot.steeringDeg || 0, this.hardware.steeringMinDeg, this.hardware.steeringMaxDeg);
+  }
+
+  update(pose, t, dt) {
+    const keys = state.hdv.keys;
+    if (keys.brake) {
+      this.targetSpeed = 0;
+    } else {
+      const throttle = (keys.w ? 1 : 0) - (keys.s ? 1 : 0);
+      this.targetSpeed = clamp(this.targetSpeed + throttle * HDV_SPEED_RATE * dt, HDV_SPEED_MIN, HDV_SPEED_MAX);
+    }
+
+    if (state.hdv.mouseWorld) {
+      const dx = state.hdv.mouseWorld.x - pose.x;
+      const dy = state.hdv.mouseWorld.y - pose.y;
+      if (Math.hypot(dx, dy) > 1e-5) {
+        const pointerAngle = Math.atan2(dy, dx);
+        this.steeringDeg = clamp(
+          wrapAngle(pointerAngle - pose.theta) * 180 / Math.PI,
+          this.hardware.steeringMinDeg,
+          this.hardware.steeringMaxDeg,
+        );
+      }
+    }
+
+    return {
+      velocity: this.targetSpeed,
+      steeringDeg: this.steeringDeg,
+      desired: state.hdv.mouseWorld ? { ...state.hdv.mouseWorld } : { x: pose.x, y: pose.y },
+    };
+  }
+}
+
 class SimVehicle {
   constructor(config, map, initialDistance) {
     this.config = config;
     this.id = config.id;
     this.route = config.route;
     this.hardware = hardwareFor(config);
-    this.controller = new CarPathController(this.hardware);
+    this.controller = config.mode === "HDV" ? new HumanDrivenController(this.hardware) : new CarPathController(this.hardware);
     this.targetSpeed = Number.isFinite(config.speed) ? config.speed : 0.35;
     this.routeDistance = initialDistance;
     this.segmentIndex = 0;
@@ -867,6 +954,9 @@ class SimVehicle {
   captureState() {
     return {
       id: this.id,
+      version: this.config.version,
+      mode: this.config.mode,
+      route: [...this.route],
       routeDistance: this.routeDistance,
       segmentIndex: this.segmentIndex,
       r: this.r,
@@ -878,6 +968,11 @@ class SimVehicle {
   }
 
   restoreState(snapshot, map) {
+    if (snapshot.version && snapshot.version !== this.config.version) this.setHardwareVersion(snapshot.version);
+    if (snapshot.route?.length) {
+      this.config.route = [...snapshot.route];
+      this.route = [...snapshot.route];
+    }
     this.routeDistance = snapshot.routeDistance;
     this.segmentIndex = snapshot.segmentIndex;
     this.r = snapshot.r;
@@ -885,9 +980,20 @@ class SimVehicle {
     this.desired = { ...snapshot.desired };
     this.control = snapshot.control ? { ...snapshot.control, desired: { ...snapshot.control.desired } } : null;
     this.controller.restoreState(snapshot.controller);
-    if (map) {
+    if (map && this.config.mode !== "HDV") {
       this.controller.pathSegment = this.currentSegment(map);
       this.controller.nextPathSegment = this.nextSegment(map);
+    }
+  }
+
+  setHardwareVersion(version) {
+    const velocityTarget = this.controller instanceof HumanDrivenController ? this.controller.targetSpeed : this.pose.v;
+    this.config.version = version;
+    this.hardware = hardwareFor(this.config);
+    if (this.config.mode === "HDV") {
+      const controller = new HumanDrivenController(this.hardware);
+      controller.targetSpeed = clamp(velocityTarget, HDV_SPEED_MIN, HDV_SPEED_MAX);
+      this.controller = controller;
     }
   }
 }
@@ -930,6 +1036,48 @@ class SimulationRuntime {
     this.recordHistory();
   }
 
+  humanVehicle() {
+    return this.vehicles.find((vehicle) => vehicle.config.mode === "HDV") || null;
+  }
+
+  placeHumanVehicle(segment, r, version = selectedHdvVersion()) {
+    const existing = this.humanVehicle();
+    if (existing) {
+      existing.config.route = [segment.id];
+      existing.route = [segment.id];
+      existing.routeDistance = r;
+      existing.r = r;
+      existing.segmentIndex = 0;
+      existing.setHardwareVersion(version);
+      existing.syncRoutePosition(this.map);
+      existing.pose.v = 0;
+      existing.pose.yawRate = 0;
+      existing.controller.targetSpeed = 0;
+      existing.desired = { x: existing.pose.x, y: existing.pose.y };
+    } else {
+      this.vehicles.push(new SimVehicle(humanVehicleConfig(version, segment.id), this.map, r));
+    }
+    this.updateCollisionState();
+    this.recordHistory();
+  }
+
+  removeHumanVehicle() {
+    const before = this.vehicles.length;
+    this.vehicles = this.vehicles.filter((vehicle) => vehicle.config.mode !== "HDV");
+    if (this.vehicles.length !== before) {
+      this.updateCollisionState();
+      this.recordHistory();
+    }
+  }
+
+  setHumanVehicleVersion(version) {
+    const vehicle = this.humanVehicle();
+    if (!vehicle) return;
+    vehicle.setHardwareVersion(version);
+    this.updateCollisionState();
+    this.recordHistory();
+  }
+
   step(dt) {
     if (this.collision.hasCollision) return false;
 
@@ -959,6 +1107,7 @@ class SimulationRuntime {
   updateMainframeCommands() {
     this.updateIntersections();
     for (const vehicle of this.vehicles) {
+      if (vehicle.config.mode === "HDV") continue;
       vehicle.transitionIfNeeded(this.map);
       const current = vehicle.currentSegment(this.map);
       const next = vehicle.nextSegment(this.map);
@@ -1080,16 +1229,18 @@ class SimulationRuntime {
       const control = vehicle.control || { velocity: 0, steeringDeg: 0 };
       const accelLimit = 1.2;
       const dv = clamp(control.velocity - vehicle.pose.v, -accelLimit * dt, accelLimit * dt);
-      vehicle.pose.v = Math.max(0, vehicle.pose.v + dv);
+      vehicle.pose.v = vehicle.config.mode === "HDV"
+        ? clamp(vehicle.pose.v + dv, HDV_SPEED_MIN, HDV_SPEED_MAX)
+        : Math.max(0, vehicle.pose.v + dv);
       const steering = control.steeringDeg * Math.PI / 180;
       vehicle.pose.yawRate = vehicle.pose.v / vehicle.hardware.wheelbase * Math.tan(steering);
       vehicle.pose.theta = wrapAngle(vehicle.pose.theta + vehicle.pose.yawRate * dt);
       vehicle.pose.x += vehicle.pose.v * Math.cos(vehicle.pose.theta) * dt;
       vehicle.pose.y += vehicle.pose.v * Math.sin(vehicle.pose.theta) * dt;
       const current = vehicle.currentSegment(this.map);
-      vehicle.r = current.project(vehicle.pose);
+      vehicle.r = clamp(current.project(vehicle.pose), 0, current.length);
       vehicle.routeDistance = routeDistanceFromIndex(this.map, vehicle.route, vehicle.segmentIndex, vehicle.r);
-      vehicle.transitionIfNeeded(this.map);
+      if (vehicle.config.mode !== "HDV") vehicle.transitionIfNeeded(this.map);
     }
   }
 
@@ -1139,9 +1290,16 @@ class SimulationRuntime {
     this.mainframeCarry = snapshot.mainframeCarry;
     this.experimentState = snapshot.experimentState;
     this.experimentCount = snapshot.experimentCount;
+    this.vehicles = this.vehicles.filter((vehicle) => snapshot.vehicles.some((vehicleState) => vehicleState.id === vehicle.id));
     for (const vehicleState of snapshot.vehicles) {
       const vehicle = this.vehicles.find((item) => item.id === vehicleState.id);
-      if (vehicle) vehicle.restoreState(vehicleState, this.map);
+      if (vehicle) {
+        vehicle.restoreState(vehicleState, this.map);
+      } else if (vehicleState.id === HDV_ID && vehicleState.route?.length) {
+        const hdv = new SimVehicle(humanVehicleConfig(vehicleState.version || selectedHdvVersion(), vehicleState.route[0]), this.map, vehicleState.r || 0);
+        hdv.restoreState(vehicleState, this.map);
+        this.vehicles.push(hdv);
+      }
     }
     snapshot.intersections.forEach((controlState, index) => {
       if (controlState && this.intersections[index]?.restoreState) {
@@ -1731,6 +1889,10 @@ function makeProjector() {
   return {
     scale,
     bounds,
+    screenToWorld: (point) => ({
+      x: bounds.maxX - (point.x - offsetX) / scale,
+      y: bounds.minY + (point.y - offsetY) / scale,
+    }),
     imagePoint: (point) => ({
       x: offsetX + (point.x - bounds.minX) * scale,
       y: offsetY + (bounds.maxY - point.y) * scale,
@@ -1740,6 +1902,48 @@ function makeProjector() {
       y: offsetY + (point.y - bounds.minY) * scale,
     }),
   };
+}
+
+function eventCanvasPoint(event) {
+  const rect = canvas.getBoundingClientRect();
+  return { x: event.clientX - rect.left, y: event.clientY - rect.top };
+}
+
+function eventWorldPoint(event) {
+  if (!state.map?.all().length) return null;
+  return makeProjector().screenToWorld(eventCanvasPoint(event));
+}
+
+function clampSegmentR(segment, r) {
+  return clamp(r, 0, segment.length);
+}
+
+function closestPointOnSegment(segment, point) {
+  let r = clampSegmentR(segment, segment.project(point));
+  let closest = segment.point(r);
+  let bestDistance = Math.hypot(point.x - closest.x, point.y - closest.y);
+
+  for (let i = 0; i <= 24; i += 1) {
+    const candidateR = segment.length * i / 24;
+    const candidate = segment.point(candidateR);
+    const distance = Math.hypot(point.x - candidate.x, point.y - candidate.y);
+    if (distance < bestDistance) {
+      r = candidateR;
+      closest = candidate;
+      bestDistance = distance;
+    }
+  }
+
+  return { segment, r, point: closest, distance: bestDistance };
+}
+
+function closestMapSegment(point) {
+  let best = null;
+  for (const segment of state.map?.all() || []) {
+    const candidate = closestPointOnSegment(segment, point);
+    if (!best || candidate.distance < best.distance) best = candidate;
+  }
+  return best;
 }
 
 function drawPolyline(points, project, color, width) {
@@ -1788,6 +1992,7 @@ function drawRouteHighlights(project) {
   const runtimeVehicles = state.runtime?.vehicles || [];
   const occupiedRoutes = new Map();
   for (const vehicle of runtimeVehicles) {
+    if (vehicle.config.mode === "HDV") continue;
     if (!vehicle.route.length) continue;
     const key = vehicle.route.join(",");
     if (!occupiedRoutes.has(key)) occupiedRoutes.set(key, vehicle.route);
@@ -1808,6 +2013,7 @@ function drawRouteHighlights(project) {
 }
 
 function vehicleLabel(vehicle) {
+  if (vehicle.config.mode === "HDV") return "HDV";
   return `${vehicle.hardware.version}${vehicle.id}`;
 }
 
@@ -1824,17 +2030,14 @@ function drawVehicle(vehicle, index, project) {
   const originOffset = Math.min(CAR_ORIGIN_REARWARD_OFFSET, vehicle.hardware.length) * scale;
   const theta = -vehicle.pose.theta + Math.PI;
   const collided = state.runtime?.collision.vehicleIds.has(vehicle.id);
+  const isHdv = vehicle.config.mode === "HDV";
 
   ctx.save();
   ctx.translate(origin.x, origin.y);
   ctx.rotate(theta);
-  if (collided) {
-    ctx.shadowColor = "rgba(255, 195, 0, 0.88)";
-    ctx.shadowBlur = 14;
-  }
-  ctx.fillStyle = collided ? "#ffd43b" : vehicle.config.mode === "HDV" ? "#777f86" : "#c82127";
-  ctx.strokeStyle = collided ? "#101820" : "#ffffff";
-  ctx.lineWidth = collided ? 2.4 : 1.5;
+  ctx.fillStyle = isHdv ? "#216fb8" : collided ? "#ffd43b" : "#c82127";
+  ctx.strokeStyle = "#ffffff";
+  ctx.lineWidth = 1.5;
   ctx.beginPath();
   ctx.rect(-length + originOffset, -width / 2, length, width);
   ctx.fill();
@@ -1845,23 +2048,67 @@ function drawVehicle(vehicle, index, project) {
   ctx.fill();
   ctx.restore();
 
-  const desired = project.point(vehicle.desired);
-  ctx.strokeStyle = "rgba(16,24,32,0.35)";
-  ctx.lineWidth = 1;
-  ctx.beginPath();
-  ctx.moveTo(origin.x, origin.y);
-  ctx.lineTo(desired.x, desired.y);
-  ctx.stroke();
+  if (isHdv) {
+    drawHdvSteeringCue(vehicle, project);
+  }
 
-  ctx.font = "12px ui-sans-serif, system-ui, sans-serif";
-  ctx.fillStyle = "#172026";
-  ctx.fillText(vehicleLabel(vehicle), origin.x + 9, origin.y - 9);
+  if (!isHdv) {
+    const desired = project.point(vehicle.desired);
+    ctx.strokeStyle = "rgba(16,24,32,0.35)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(origin.x, origin.y);
+    ctx.lineTo(desired.x, desired.y);
+    ctx.stroke();
+  }
+
+  if (!isHdv) {
+    ctx.font = "13px ui-sans-serif, system-ui, sans-serif";
+    ctx.fillStyle = "#172026";
+    ctx.fillText(vehicleLabel(vehicle), origin.x + 9, origin.y - 9);
+  }
+}
+
+function drawHdvSteeringCue(vehicle, project) {
+  const steeringDeg = vehicle.control?.steeringDeg || vehicle.controller?.steeringDeg || 0;
+  const angle = vehicle.pose.theta + steeringDeg * Math.PI / 180;
+  const cueLength = Math.max(0.12, vehicle.hardware.length * 0.9);
+  const start = project.point(vehicle.pose);
+  const end = project.point({
+    x: vehicle.pose.x + cueLength * Math.cos(angle),
+    y: vehicle.pose.y + cueLength * Math.sin(angle),
+  });
+  const arrowAngle = Math.atan2(end.y - start.y, end.x - start.x);
+  const head = Math.max(5, 0.032 * project.scale);
+
+  ctx.save();
+  ctx.strokeStyle = "#0b4f8a";
+  ctx.fillStyle = "#0b4f8a";
+  ctx.lineWidth = 2;
+  ctx.lineCap = "round";
+  ctx.beginPath();
+  ctx.moveTo(start.x, start.y);
+  ctx.lineTo(end.x, end.y);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(end.x, end.y);
+  ctx.lineTo(
+    end.x - head * Math.cos(arrowAngle - Math.PI / 6),
+    end.y - head * Math.sin(arrowAngle - Math.PI / 6),
+  );
+  ctx.lineTo(
+    end.x - head * Math.cos(arrowAngle + Math.PI / 6),
+    end.y - head * Math.sin(arrowAngle + Math.PI / 6),
+  );
+  ctx.closePath();
+  ctx.fill();
+  ctx.restore();
 }
 
 function drawEmptyMessage() {
   const rect = canvas.getBoundingClientRect();
   ctx.fillStyle = "#53636b";
-  ctx.font = "15px ui-sans-serif, system-ui, sans-serif";
+  ctx.font = "13px ui-sans-serif, system-ui, sans-serif";
   ctx.textAlign = "center";
   ctx.fillText("Upload Cars.yaml and Experiment.yaml to run the simulation.", rect.width / 2, rect.height / 2);
   ctx.textAlign = "start";
@@ -1889,11 +2136,54 @@ function draw() {
 
 function updateReadouts() {
   const time = state.runtime?.time || 0;
-  const count = state.runtime?.vehicles.length || 0;
+  const hdv = state.runtime?.humanVehicle?.();
   timeReadout.textContent = `${time.toFixed(2)} s`;
-  vehicleReadout.textContent = `${count} vehicle${count === 1 ? "" : "s"}`;
+  vehicleReadout.textContent = hdv ? `HDV ${hdv.pose.v.toFixed(2)} m/s` : "HDV -- m/s";
   if (!state.runtime) timeSlider.value = "0";
   else if (state.playing) timeSlider.value = "1";
+  updateHdvPanel();
+}
+
+function setHdvPlacing(placing) {
+  state.hdv.placing = placing;
+  placeHdvButton.classList.toggle("is-placing", placing);
+  canvas.classList.toggle("is-placing-hdv", placing);
+  updateHdvPanel();
+}
+
+function updateHdvPanel() {
+  const vehicle = state.runtime?.humanVehicle?.();
+  if (state.hdv.placing) {
+    placeHdvButton.textContent = "Cancel";
+  } else if (vehicle) {
+    placeHdvButton.textContent = "Remove";
+  } else {
+    placeHdvButton.textContent = "Add";
+  }
+}
+
+function ensureRuntimeForHdv() {
+  if (state.runtime) return true;
+  if (!state.map?.all().length) {
+    showError("Load a map before placing the human-driven vehicle.");
+    return false;
+  }
+  state.scenario = state.scenario || { vehicles: [] };
+  state.runtime = new SimulationRuntime(state.map, state.scenario);
+  state.bounds = computeBounds();
+  timeSlider.value = "1";
+  return true;
+}
+
+function placeHumanVehicleAt(point) {
+  if (!ensureRuntimeForHdv()) return;
+  const match = closestMapSegment(point);
+  if (!match) return;
+  state.runtime.placeHumanVehicle(match.segment, match.r, selectedHdvVersion());
+  setHdvPlacing(false);
+  const version = selectedHdvVersion();
+  setStatus(`${version[0].toUpperCase() + version.slice(1)} placed.`);
+  draw();
 }
 
 function tick(nowMs) {
@@ -1943,6 +2233,7 @@ function loadMapOnly(linesText, arcsText) {
   state.lastTickMs = 0;
   playButton.textContent = "Play";
   timeSlider.value = "0";
+  setHdvPlacing(false);
   draw();
 }
 
@@ -1962,6 +2253,7 @@ function loadRuntime(linesText, arcsText, carsText, experimentText) {
     state.lastTickMs = 0;
     playButton.textContent = "Play";
     timeSlider.value = "1";
+    setHdvPlacing(false);
     draw();
     return true;
   } catch (error) {
@@ -2042,8 +2334,75 @@ errorCloseButton.addEventListener("click", hideError);
 errorDialog.addEventListener("click", (event) => {
   if (event.target === errorDialog) hideError();
 });
+
+hdvVersionSelect.addEventListener("change", () => {
+  state.hdv.version = selectedHdvVersion();
+  state.runtime?.setHumanVehicleVersion(state.hdv.version);
+  const vehicle = state.runtime?.humanVehicle?.();
+  if (vehicle) {
+    const version = vehicle.hardware.version;
+    setStatus(`${version[0].toUpperCase() + version.slice(1)} placed.`);
+  }
+  draw();
+});
+
+placeHdvButton.addEventListener("click", () => {
+  const vehicle = state.runtime?.humanVehicle?.();
+  if (vehicle) {
+    state.runtime.removeHumanVehicle();
+    setHdvPlacing(false);
+    setStatus("Human-driven vehicle removed.");
+    draw();
+    return;
+  }
+  if (state.hdv.placing) {
+    setHdvPlacing(false);
+    setStatus("Human-driven vehicle placement canceled.");
+    return;
+  }
+  if (!ensureRuntimeForHdv()) return;
+  setHdvPlacing(true);
+  setStatus("Click the map to place the human-driven vehicle.");
+});
+
+canvas.addEventListener("mousemove", (event) => {
+  const point = eventWorldPoint(event);
+  if (!point) return;
+  state.hdv.mouseWorld = point;
+});
+
+canvas.addEventListener("mouseleave", () => {
+  state.hdv.mouseWorld = null;
+});
+
+canvas.addEventListener("click", (event) => {
+  if (!state.hdv.placing) return;
+  const point = eventWorldPoint(event);
+  if (point) placeHumanVehicleAt(point);
+});
+
 window.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && !errorDialog.hidden) hideError();
+  const target = event.target;
+  const isTyping = target instanceof HTMLInputElement || target instanceof HTMLSelectElement || target instanceof HTMLTextAreaElement;
+  if (isTyping) return;
+  const key = event.key.toLowerCase();
+  if (key === "w") state.hdv.keys.w = true;
+  else if (key === "s") state.hdv.keys.s = true;
+  else if (event.code === "Space") {
+    state.hdv.keys.brake = true;
+    event.preventDefault();
+  }
+});
+
+window.addEventListener("keyup", (event) => {
+  const key = event.key.toLowerCase();
+  if (key === "w") state.hdv.keys.w = false;
+  else if (key === "s") state.hdv.keys.s = false;
+  else if (event.code === "Space") {
+    state.hdv.keys.brake = false;
+    event.preventDefault();
+  }
 });
 
 resetButton.addEventListener("click", () => {
