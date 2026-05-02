@@ -22,6 +22,8 @@ const HARDWARE = {
       skSoft: 1.0,
       skYaw: 0.2,
       skSteer: 0.1,
+      useSteerFeedback: false,
+      minStanleySpeed: 0.2,
       mass: 0.364,
       cy: 1.6,
       kp: 0.1225,
@@ -31,15 +33,17 @@ const HARDWARE = {
   },
   manta: {
     default: {
-      length: 0.2,
+      length: 0.18,
       width: 0.1,
       wheelbase: 0.12,
       steeringMinDeg: -45,
       steeringMaxDeg: 45,
-      sk: 3.0,
-      skSoft: 1.0,
-      skYaw: 0.2,
+      sk: 6.0,
+      skSoft: 0.1,
+      skYaw: 0.1,
       skSteer: 0.1,
+      useSteerFeedback: true,
+      minStanleySpeed: 0,
       mass: 0.364,
       cy: 1.6,
       kp: 0.1225,
@@ -52,13 +56,19 @@ const HARDWARE = {
 const SIM_DT = 1 / 100;
 const CONTROL_DT = 1 / 50;
 const MAINFRAME_DT = 1 / 50;
-const DEFAULT_LINEUP_GAP = 0.18;
+const DEFAULT_LINEUP_GAP = 0.04;
 const DEFAULT_FRONT_MARGIN = 0.04;
 const CAR_ORIGIN_REARWARD_OFFSET = 0.02;
 const COLLISION_CELL_SIZE = 0.35;
 const INTERSECTION_QUEUE_DISTANCE = 0.20;
-const STOPPING_BUFFER = 0.9 * 0.22;
 const CONTROL_ZONE_CAR_LENGTH_ALLOWANCE = 0.1;
+const DEFAULT_IDM = {
+  s0: 0.1,
+  a: 10.0,
+  b: 15.0,
+  delta: 4.0,
+  th: 1.5,
+};
 const ROUTE_HIGHLIGHT_COLORS = [
   "rgba(229, 72, 77, 0.13)",
   "rgba(46, 134, 222, 0.13)",
@@ -131,7 +141,7 @@ function setStatus(message) {
 
 function collisionStatusText(collision = state.runtime?.collision) {
   if (!collision?.hasCollision) return "";
-  const pairs = collision.pairs.map(([a, b]) => `${a}-${b}`).join(", ");
+  const pairs = collision.pairs.map(([a, b]) => `${vehicleLabelById(a)}-${vehicleLabelById(b)}`).join(", ");
   return `Collision detected between cars ${pairs}. Simulation stopped.`;
 }
 
@@ -186,6 +196,26 @@ function splitList(value) {
   return value.split(",").map((item) => item.trim()).filter(Boolean);
 }
 
+function parseYamlNumber(node, key, fallback = 0) {
+  const child = node?.child(key);
+  if (!child || !child.value.trim()) return fallback;
+  const value = parseFloat(child.value);
+  if (!Number.isFinite(value)) {
+    throw new Error(`${key} on line ${child.line} must be a number; got "${child.value}".`);
+  }
+  return value;
+}
+
+function parseOptionalYamlNumber(node, key) {
+  const child = node?.child(key);
+  if (!child || !child.value.trim()) return null;
+  const value = parseFloat(child.value);
+  if (!Number.isFinite(value)) {
+    throw new Error(`${key} on line ${child.line} must be a number; got "${child.value}".`);
+  }
+  return value;
+}
+
 function countIndent(line) {
   let count = 0;
   for (const char of line) {
@@ -197,15 +227,28 @@ function countIndent(line) {
 }
 
 class YamlNode {
-  constructor(key = "", value = "", anchor = "") {
+  constructor(key = "", value = "", anchor = "", line = 0) {
     this.key = key;
+    this.originalKey = key;
     this.value = value.trim();
     this.anchor = anchor;
+    this.line = line;
     this.children = new Map();
     this.order = [];
   }
 
   add(child) {
+    let key = child.key;
+    if (this.children.has(key)) {
+      let copyIndex = 1;
+      let renamed = `${key}${copyIndex}`;
+      while (this.children.has(renamed)) {
+        copyIndex += 1;
+        renamed = `${key}${copyIndex}`;
+      }
+      child.originalKey = key;
+      child.key = renamed;
+    }
     this.children.set(child.key, child);
     this.order.push(child);
   }
@@ -227,14 +270,22 @@ class YamlNode {
 function parseSimpleYaml(text) {
   const root = new YamlNode("__root__");
   const stack = [{ indent: -1, node: root }];
-  for (const rawLine of text.split(/\r?\n/)) {
+  const lines = text.split(/\r?\n/);
+  for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
+    const rawLine = lines[lineIndex];
+    const lineNumber = lineIndex + 1;
     const uncommented = stripComment(rawLine);
     if (!uncommented.trim()) continue;
     const indent = countIndent(uncommented);
     const trimmed = uncommented.trim();
     const colon = trimmed.indexOf(":");
-    if (colon < 0) continue;
+    if (colon < 0) {
+      throw new Error(`YAML parse error on line ${lineNumber}: expected "key: value".`);
+    }
     const key = trimmed.slice(0, colon).trim();
+    if (!key) {
+      throw new Error(`YAML parse error on line ${lineNumber}: missing key before ":".`);
+    }
     let value = trimmed.slice(colon + 1).trim();
     let anchor = "";
     const anchorMatch = value.match(/^(.*?)\s*&([A-Za-z0-9_]+)\s*$/);
@@ -242,8 +293,11 @@ function parseSimpleYaml(text) {
       value = anchorMatch[1].trim();
       anchor = anchorMatch[2];
     }
-    const node = new YamlNode(key, value, anchor);
+    const node = new YamlNode(key, value, anchor, lineNumber);
     while (stack.length && indent <= stack[stack.length - 1].indent) stack.pop();
+    if (!stack.length) {
+      throw new Error(`YAML parse error on line ${lineNumber}: invalid indentation.`);
+    }
     stack[stack.length - 1].node.add(node);
     stack.push({ indent, node });
   }
@@ -259,6 +313,7 @@ function parseCarsYaml(text) {
   const root = parseSimpleYaml(text);
   const anchorPaths = new Map();
   const vehicles = [];
+  const seenIds = new Map();
 
   for (const child of root.order) {
     if (child.anchor) {
@@ -271,15 +326,23 @@ function parseCarsYaml(text) {
 
   for (const node of nodeChildrenWithPrefix(root, "Vehicle")) {
     const id = Number(node.value);
-    if (!Number.isFinite(id)) continue;
+    if (!Number.isInteger(id)) {
+      throw new Error(`${node.key} on line ${node.line} has an invalid vehicle id "${node.value}".`);
+    }
+    if (seenIds.has(id)) {
+      throw new Error(`${node.key} on line ${node.line} reuses vehicle id ${id}; first used by ${seenIds.get(id)}.`);
+    }
+    seenIds.set(id, node.key);
     const vehicle = {
       id,
+      key: node.key,
       version: node.childValue("Version", "manta"),
       mode: node.childValue("Mode", "CAV"),
       controller: "IDM",
       controllers: splitList(node.childValue("Controllers")),
       switchSegments: splitList(node.childValue("Switch")),
       speed: 0.35,
+      idm: { ...DEFAULT_IDM },
       route: [],
       pathType: "Loop",
     };
@@ -291,10 +354,14 @@ function parseCarsYaml(text) {
       if (path) {
         vehicle.pathType = path.type;
         vehicle.route = path.route;
+      } else {
+        throw new Error(`${node.key} references unknown path anchor "${pathValue}".`);
       }
     } else if (inlinePath) {
       vehicle.pathType = inlinePath.childValue("Type", "Loop");
       vehicle.route = splitList(inlinePath.childValue("Segments"));
+    } else {
+      throw new Error(`${node.key} is missing a Path definition.`);
     }
 
     if (!vehicle.controllers.length && node.has("Controller")) {
@@ -308,13 +375,20 @@ function parseCarsYaml(text) {
     for (const controllerName of speedNodes) {
       const controllerNode = node.child(controllerName);
       if (!controllerNode) continue;
-      const speed = Number(controllerNode.childValue("speed"));
-      if (Number.isFinite(speed)) {
+      const speed = parseOptionalYamlNumber(controllerNode, "speed");
+      if (speed !== null) {
         vehicle.speed = speed;
-        break;
       }
+      for (const key of Object.keys(DEFAULT_IDM)) {
+        const value = parseOptionalYamlNumber(controllerNode, key);
+        if (value !== null) vehicle.idm[key] = value;
+      }
+      break;
     }
 
+    if (!vehicle.route.length && vehicle.pathType !== "HDV") {
+      throw new Error(`${node.key} does not include any route segments.`);
+    }
     if (vehicle.route.length) vehicles.push(vehicle);
   }
 
@@ -338,15 +412,15 @@ function parseExperimentYaml(text) {
         name: child.key,
         label: child.value,
         random: !deterministic,
-        inflow: Number(typeNode?.childValue("inflow", "0")) || 0,
-        inflowMin: Number(typeNode?.childValue("inflowMin", "0")) || 0,
-        inflowMax: Number(typeNode?.childValue("inflowMax", "0")) || 0,
-        delay: Number(typeNode?.childValue("delay", "0")) || 0,
-        delayMin: Number(typeNode?.childValue("inflowDelayMin", "0")) || 0,
-        delayMax: Number(typeNode?.childValue("inflowDelayMax", "0")) || 0,
-        releaseDelta: Number(typeNode?.childValue("releaseDelta", "0")) || 0,
+        inflow: parseYamlNumber(typeNode, "inflow"),
+        inflowMin: parseYamlNumber(typeNode, "inflowMin"),
+        inflowMax: parseYamlNumber(typeNode, "inflowMax"),
+        delay: parseYamlNumber(typeNode, "delay"),
+        delayMin: parseYamlNumber(typeNode, "inflowDelayMin"),
+        delayMax: parseYamlNumber(typeNode, "inflowDelayMax"),
+        releaseDelta: parseYamlNumber(typeNode, "releaseDelta"),
         segments: splitList(segmentsNode?.value || ""),
-        offset: Number(segmentsNode?.childValue("offset", "0")) || 0,
+        offset: parseYamlNumber(segmentsNode, "offset"),
         backup: splitList(segmentsNode?.childValue("backup", "")),
       });
     } else if (child.key.startsWith("Yield")) {
@@ -359,7 +433,7 @@ function parseExperimentYaml(text) {
         name: child.key,
         label: child.value,
         segments: splitList(segmentsNode?.value || ""),
-        offset: Number(segmentsNode?.childValue("offset", "0")) || 0,
+        offset: parseYamlNumber(segmentsNode, "offset"),
         yieldTo: yieldSegments,
         offsets,
       });
@@ -687,12 +761,15 @@ class CarPathController {
   }
 
   stanley(thetaE, yE, yawDotDesired, pose) {
-    const copyVel = Math.max(pose.v, 0.2);
+    const copyVel = Math.max(pose.v, this.hardware.minStanleySpeed);
     const steer = (thetaE - this.skAg * copyVel * yawDotDesired)
       + Math.atan2(this.hardware.sk * yE, this.hardware.skSoft + copyVel)
       - this.hardware.skYaw * (pose.yawRate - yawDotDesired);
+    const steerWithFeedback = this.hardware.useSteerFeedback
+      ? steer + this.hardware.skSteer * (steer - this.prevSteer * Math.PI / 180)
+      : steer;
     const steeringDeg = clamp(
-      steer * 180 / Math.PI + this.calib,
+      steerWithFeedback * 180 / Math.PI + this.calib,
       this.hardware.steeringMinDeg,
       this.hardware.steeringMaxDeg,
     );
@@ -899,11 +976,7 @@ class SimulationRuntime {
 
   idmSpeedCommand(vehicle) {
     const leader = findLeader(vehicle, this.vehicles, this.map);
-    const s0 = 0.22;
-    const th = 0.8;
-    const a = 0.9;
-    const b = 0.8;
-    const delta = 4;
+    const { s0, th, a, b, delta } = vehicle.config.idm || DEFAULT_IDM;
     let vUpper = Math.min(vehicle.targetSpeed, vehicle.currentSegment(this.map).speedLimit);
     const v0 = vehicle.pose.v;
     const gate = this.intersectionGate(vehicle, leader);
@@ -945,13 +1018,17 @@ class SimulationRuntime {
       const allOperational = queues.every((queue) => queue.allOperational);
       if (ready && (this.experimentCount === 0 || allOperational)) {
         this.experimentState = "STARTING";
+        this.startExperiment();
       }
+      return;
     }
 
     if (this.experimentState === "STARTING") {
-      this.startExperiment();
       this.experimentState = "RUNNING";
-    } else if (this.experimentState === "RUNNING" && queues.some((queue) => queue.isBack)) {
+      return;
+    }
+
+    if (this.experimentState === "RUNNING" && queues.some((queue) => queue.isBack)) {
       this.experimentState = "WAITING";
       this.stopExperiment();
     }
@@ -964,7 +1041,8 @@ class SimulationRuntime {
       if (distance <= 0) continue;
       const canGo = control.canGo(vehicle, this);
       if (!canGo) {
-        const stopDistance = distance + STOPPING_BUFFER;
+        const s0 = vehicle.config.idm?.s0 ?? DEFAULT_IDM.s0;
+        const stopDistance = distance + 0.9 * s0;
         if (stopDistance <= gate.distance) gate = { distance: stopDistance, velocity: 0 };
       }
       if (distance < INTERSECTION_QUEUE_DISTANCE && typeof control.addToQueue === "function") {
@@ -1153,7 +1231,6 @@ class QueueSignControl extends BaseIntersectionControl {
     this.stop = true;
     this.passed = [];
     this.isBack = false;
-    this.awaitingQueueDeparture = true;
     if (this.currentOccupants === undefined) this.currentOccupants = [];
     if (this.pastOccupants === undefined) this.pastOccupants = [];
     if (this.lastReleaseTime === undefined) this.lastReleaseTime = -Infinity;
@@ -1167,16 +1244,12 @@ class QueueSignControl extends BaseIntersectionControl {
     this.currentOccupants = [];
     this.pastOccupants = [];
     this.isBack = false;
-    this.awaitingQueueDeparture = true;
   }
 
   update(runtime) {
     this.currentOccupants = vehiclesOnSegments(runtime.vehicles, [...this.groups[0].segments, ...this.backupSegments]);
     const enteredNow = this.currentOccupants.some((id) => !this.pastOccupants.includes(id));
-    if (this.awaitingQueueDeparture && this.currentOccupants.length === 0) {
-      this.awaitingQueueDeparture = false;
-    }
-    this.isBack = !this.awaitingQueueDeparture && enteredNow;
+    this.isBack = enteredNow;
     for (const id of this.pastOccupants) {
       if (!this.currentOccupants.includes(id)) {
         this.passed.push(id);
@@ -1212,7 +1285,6 @@ class QueueSignControl extends BaseIntersectionControl {
       lastReleaseTime: this.lastReleaseTime,
       startTime: this.startTime,
       isBack: this.isBack,
-      awaitingQueueDeparture: this.awaitingQueueDeparture,
       allOperational: this.allOperational,
     };
   }
@@ -1228,7 +1300,6 @@ class QueueSignControl extends BaseIntersectionControl {
     this.lastReleaseTime = snapshot.lastReleaseTime;
     this.startTime = snapshot.startTime;
     this.isBack = snapshot.isBack;
-    this.awaitingQueueDeparture = snapshot.awaitingQueueDeparture;
     this.allOperational = snapshot.allOperational;
   }
 }
@@ -1412,6 +1483,71 @@ function buildIntersectionControls(experiment, map) {
   return controls;
 }
 
+function routeKey(route) {
+  return route.join(",");
+}
+
+function describeRoute(route) {
+  return route.join(" -> ");
+}
+
+function deterministicQueueInflow(queue) {
+  return queue.random ? null : queue.inflow;
+}
+
+function validateScenarioInputs(map, scenario, experiment) {
+  const autonomousVehicles = scenario.vehicles.filter((vehicle) => vehicle.mode !== "HDV" && vehicle.route.length);
+  const routeGroups = new Map();
+
+  for (const vehicle of autonomousVehicles) {
+    for (const segmentId of vehicle.route) {
+      map.get(segmentId);
+    }
+    const key = routeKey(vehicle.route);
+    if (!routeGroups.has(key)) routeGroups.set(key, []);
+    routeGroups.get(key).push(vehicle);
+  }
+
+  for (const vehicles of routeGroups.values()) {
+    const route = vehicles[0].route;
+    const startSegment = map.get(route[0]);
+    const maxLength = Math.max(...vehicles.map((vehicle) => hardwareFor(vehicle).length));
+    const spacing = maxLength + DEFAULT_LINEUP_GAP;
+    const rearClearance = Math.max(0, maxLength - CAR_ORIGIN_REARWARD_OFFSET);
+    const requiredLength = DEFAULT_FRONT_MARGIN + rearClearance + (vehicles.length - 1) * spacing;
+    if (requiredLength > startSegment.length + 1e-9) {
+      const ids = vehicles.map((vehicle) => `${vehicle.key || "Vehicle"}:${vehicle.id}`).join(", ");
+      throw new Error(`Start segment ${route[0]} is too short for ${vehicles.length} cars on route ${describeRoute(route)}. Needs ${requiredLength.toFixed(2)} m with the current lineup spacing, but ${route[0]} is ${startSegment.length.toFixed(2)} m. Vehicles: ${ids}.`);
+    }
+  }
+
+  for (const queue of experiment?.queues || []) {
+    for (const segmentId of [...queue.segments, ...queue.backup]) {
+      map.get(segmentId);
+    }
+    if (!queue.segments.length) {
+      throw new Error(`${queue.name} has no queue segments.`);
+    }
+
+    const expected = deterministicQueueInflow(queue);
+    if (expected === null) {
+      const actual = autonomousVehicles.filter((vehicle) => vehicle.route[0] === queue.segments[0]).length;
+      if (actual < queue.inflowMin || actual > queue.inflowMax) {
+        throw new Error(`${queue.name} random inflow range ${queue.inflowMin}-${queue.inflowMax} does not include the ${actual} vehicles whose route starts on ${queue.segments[0]}.`);
+      }
+      continue;
+    }
+
+    const matchingVehicles = autonomousVehicles.filter((vehicle) => vehicle.route[0] === queue.segments[0]);
+    if (matchingVehicles.length !== expected) {
+      const ids = matchingVehicles.length
+        ? matchingVehicles.map((vehicle) => `${vehicle.key || "Vehicle"}:${vehicle.id}`).join(", ")
+        : "none";
+      throw new Error(`${queue.name} inflow is ${expected}, but ${matchingVehicles.length} vehicles start on ${queue.segments[0]}. Matching vehicles: ${ids}.`);
+    }
+  }
+}
+
 function emptyCollision() {
   return { hasCollision: false, vehicleIds: new Set(), pairs: [] };
 }
@@ -1541,7 +1677,7 @@ function createVehiclesWithLineup(map, scenario) {
   for (const configs of groups.values()) {
     const startSegment = map.get(configs[0].route[0]);
     const firstR = Math.max(0.01, startSegment.length - DEFAULT_FRONT_MARGIN);
-    const spacing = HARDWARE.lotus.default.length + DEFAULT_LINEUP_GAP;
+    const spacing = Math.max(...configs.map((config) => hardwareFor(config).length)) + DEFAULT_LINEUP_GAP;
     configs.forEach((config, index) => {
       vehicles.push(new SimVehicle(config, map, firstR - index * spacing));
     });
@@ -1673,6 +1809,11 @@ function drawRouteHighlights(project) {
 
 function vehicleLabel(vehicle) {
   return `${vehicle.hardware.version}${vehicle.id}`;
+}
+
+function vehicleLabelById(id) {
+  const vehicle = state.runtime?.vehicles.find((item) => item.id === id);
+  return vehicle ? vehicleLabel(vehicle) : String(id);
 }
 
 function drawVehicle(vehicle, index, project) {
@@ -1814,6 +1955,7 @@ function loadRuntime(linesText, arcsText, carsText, experimentText) {
       throw new Error("Cars.yaml does not include any autonomous vehicles with valid routes.");
     }
     state.experiment = parseExperimentYaml(experimentText || "");
+    validateScenarioInputs(state.map, state.scenario, state.experiment);
     state.runtime = new SimulationRuntime(state.map, state.scenario);
     state.bounds = computeBounds();
     state.playing = false;
