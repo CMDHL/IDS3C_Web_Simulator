@@ -30,8 +30,8 @@ select {
   grid-template-columns: minmax(0, 1fr) minmax(250px, 300px);
   grid-template-rows: auto minmax(0, 1fr);
   grid-template-areas:
-    "viewport controls"
-    "viewport status";
+    "viewport status"
+    "viewport controls";
   gap: 12px;
   min-height: 100vh;
   padding: 12px;
@@ -282,8 +282,8 @@ canvas.is-placing-hdv {
     grid-template-columns: 1fr;
     grid-template-rows: auto auto auto;
     grid-template-areas:
-      "controls"
       "status"
+      "controls"
       "viewport";
   }
 
