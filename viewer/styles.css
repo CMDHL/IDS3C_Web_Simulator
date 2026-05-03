@@ -40,6 +40,7 @@ select {
 .topbar,
 .file-grid,
 .hdv-panel,
+.external-panel,
 .transport {
   display: flex;
   align-items: stretch;
@@ -191,7 +192,8 @@ input[type="file"] {
   gap: 9px;
 }
 
-.hdv-panel h2 {
+.hdv-panel h2,
+.external-panel h2 {
   grid-column: 1 / -1;
   margin: 0;
   color: #21343a;
@@ -218,6 +220,27 @@ input[type="file"] {
 
 canvas.is-placing-hdv {
   cursor: crosshair;
+}
+
+.external-panel {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 9px;
+}
+
+.external-panel input {
+  min-width: 0;
+  min-height: 32px;
+  padding: 0 8px;
+  border: 1px solid #c3ccd0;
+  border-radius: 6px;
+  background: #ffffff;
+  color: #172026;
+}
+
+#externalStatus {
+  grid-column: 1 / -1;
+  min-height: 18px;
 }
 
 .modal {

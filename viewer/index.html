@@ -40,6 +40,13 @@
           <p class="hdv-instructions">W/S: change speed<br>SPACE: brake</p>
         </div>
 
+        <div class="external-panel" aria-label="External controller controls">
+          <h2>External Controller</h2>
+          <input id="externalUrlInput" type="url" value="ws://127.0.0.1:8765" aria-label="External controller WebSocket URL">
+          <button id="externalConnectButton" type="button">Connect</button>
+          <p id="externalStatus">Disconnected</p>
+        </div>
+
         <div class="transport">
           <button id="playButton" type="button">Start</button>
           <button id="resetButton" type="button">Reset</button>

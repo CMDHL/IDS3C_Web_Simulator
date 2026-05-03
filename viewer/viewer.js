@@ -99,6 +99,9 @@ const experimentInput = document.querySelector("#experimentInput");
 const hdvVersionSelect = document.querySelector("#hdvVersionSelect");
 const placeHdvButton = document.querySelector("#placeHdvButton");
 const hdvSteeringSlider = document.querySelector("#hdvSteeringSlider");
+const externalUrlInput = document.querySelector("#externalUrlInput");
+const externalConnectButton = document.querySelector("#externalConnectButton");
+const externalStatus = document.querySelector("#externalStatus");
 const errorDialog = document.querySelector("#errorDialog");
 const errorMessage = document.querySelector("#errorMessage");
 const errorCloseButton = document.querySelector("#errorCloseButton");
@@ -127,6 +130,13 @@ const state = {
       s: false,
       brake: false,
     },
+  },
+  external: {
+    socket: null,
+    connected: false,
+    frameSeq: 0,
+    commands: new Map(),
+    lastError: "",
   },
 };
 
@@ -905,6 +915,43 @@ function interpolateProfile(times = [], speeds = [], t) {
   return speeds[0] || 0;
 }
 
+function externalCommandForVehicle(vehicle) {
+  if (!state.external.connected || vehicle.config.mode !== "HDV") return null;
+  const labels = externalVehicleAliases(vehicle);
+  for (const label of labels) {
+    const command = state.external.commands.get(label);
+    if (command) return command;
+  }
+  return null;
+}
+
+function controlFromVelocityCommand(command, pose, hardware) {
+  const vx = Number(command.vx);
+  const vy = Number(command.vy);
+  if (!Number.isFinite(vx) || !Number.isFinite(vy)) {
+    return { speed: 0, steeringDeg: 0 };
+  }
+
+  const magnitude = Math.hypot(vx, vy);
+  if (magnitude <= 0.001) return { speed: 0, steeringDeg: 0 };
+
+  const desiredTheta = Math.atan2(vy, vx);
+  let headingError = wrapAngle(desiredTheta - pose.theta);
+  let direction = 1;
+  if (Math.abs(headingError) > Math.PI / 2) {
+    direction = -1;
+    headingError = wrapAngle(headingError + Math.PI);
+  }
+
+  const steeringDeg = clamp(
+    headingError * 180 / Math.PI,
+    hardware.steeringMinDeg,
+    hardware.steeringMaxDeg,
+  );
+  const speed = clamp(direction * magnitude, HDV_SPEED_MIN, HDV_SPEED_MAX);
+  return { speed, steeringDeg };
+}
+
 class HumanDrivenController {
   constructor(hardware) {
     this.hardware = hardware;
@@ -926,20 +973,27 @@ class HumanDrivenController {
     this.steeringDeg = clamp(snapshot.steeringDeg || 0, this.hardware.steeringMinDeg, this.hardware.steeringMaxDeg);
   }
 
-  update(pose, t, dt) {
-    const keys = state.hdv.keys;
-    if (keys.brake) {
-      this.targetSpeed = 0;
+  update(pose, t, dt, vehicle = null) {
+    const externalCommand = vehicle ? externalCommandForVehicle(vehicle) : null;
+    if (externalCommand) {
+      const control = controlFromVelocityCommand(externalCommand, pose, this.hardware);
+      this.targetSpeed = control.speed;
+      this.steeringDeg = control.steeringDeg;
     } else {
-      const throttle = (keys.w ? 1 : 0) - (keys.s ? 1 : 0);
-      this.targetSpeed = clamp(this.targetSpeed + throttle * HDV_SPEED_RATE * dt, HDV_SPEED_MIN, HDV_SPEED_MAX);
-    }
+      const keys = state.hdv.keys;
+      if (keys.brake) {
+        this.targetSpeed = 0;
+      } else {
+        const throttle = (keys.w ? 1 : 0) - (keys.s ? 1 : 0);
+        this.targetSpeed = clamp(this.targetSpeed + throttle * HDV_SPEED_RATE * dt, HDV_SPEED_MIN, HDV_SPEED_MAX);
+      }
 
-    this.steeringDeg = clamp(
-      state.hdv.steeringDeg,
-      this.hardware.steeringMinDeg,
-      this.hardware.steeringMaxDeg,
-    );
+      this.steeringDeg = clamp(
+        state.hdv.steeringDeg,
+        this.hardware.steeringMinDeg,
+        this.hardware.steeringMaxDeg,
+      );
+    }
 
     return {
       velocity: this.targetSpeed,
@@ -1292,7 +1346,7 @@ class SimulationRuntime {
 
   updateControllers(dt) {
     for (const vehicle of this.vehicles) {
-      vehicle.control = vehicle.controller.update(vehicle.pose, this.time, dt);
+      vehicle.control = vehicle.controller.update(vehicle.pose, this.time, dt, vehicle);
       vehicle.desired = vehicle.control.desired;
     }
   }
@@ -2156,8 +2210,18 @@ function drawRouteHighlights(project) {
 }
 
 function vehicleLabel(vehicle) {
-  if (vehicle.config.mode === "HDV" && !vehicle.config.listedHdv) return "HDV";
+  if (vehicle.config.mode === "HDV" && !vehicle.config.listedHdv) return vehicle.hardware.version;
   return `${vehicle.hardware.version}_${vehicle.id}`;
+}
+
+function externalVehicleAliases(vehicle) {
+  const aliases = new Set([vehicleLabel(vehicle), String(vehicle.id)]);
+  if (vehicle.config.mode === "HDV") {
+    aliases.add(vehicle.hardware.version);
+    aliases.add(`${vehicle.hardware.version}_${vehicle.id}`);
+  }
+  if (vehicle.config.label) aliases.add(vehicle.config.label);
+  return [...aliases];
 }
 
 function vehicleLabelById(id) {
@@ -2351,6 +2415,160 @@ function placeHumanVehicleAt(point) {
   draw();
 }
 
+function mapCenterPoint() {
+  const bounds = state.bounds || computeBounds();
+  return {
+    x: (bounds.minX + bounds.maxX) * 0.5,
+    y: (bounds.minY + bounds.maxY) * 0.5,
+  };
+}
+
+function ensureDefaultExternalHdv() {
+  if (!ensureRuntimeForHdv()) return false;
+  if (state.runtime.humanVehicle()) return true;
+  const match = closestMapSegment(mapCenterPoint());
+  if (!match) return false;
+  state.runtime.placeHumanVehicle(match.segment, match.r, { ...defaultHdvTemplates()[1], version: "manta" });
+  setHdvPlacing(false);
+  draw();
+  return true;
+}
+
+function externalFrame() {
+  const runtime = state.runtime;
+  const cars = (runtime?.vehicles || []).map((vehicle) => {
+    const speed = vehicle.pose.v || 0;
+    const vx = speed * Math.cos(vehicle.pose.theta);
+    const vy = speed * Math.sin(vehicle.pose.theta);
+    return {
+      id: vehicle.id,
+      label: vehicleLabel(vehicle),
+      aliases: externalVehicleAliases(vehicle),
+      mode: vehicle.config.mode,
+      model: vehicle.hardware.version,
+      x: vehicle.pose.x,
+      y: vehicle.pose.y,
+      vx,
+      vy,
+      speed,
+      segmentId: vehicle.route[vehicle.segmentIndex] || "",
+    };
+  });
+  return {
+    type: "frame",
+    seq: ++state.external.frameSeq,
+    time: runtime?.time || 0,
+    cars,
+  };
+}
+
+function sendExternalFrame() {
+  const socket = state.external.socket;
+  if (!socket || socket.readyState !== WebSocket.OPEN) return;
+  socket.send(JSON.stringify(externalFrame()));
+}
+
+function setExternalStatus(message) {
+  externalStatus.textContent = message;
+}
+
+function normalizeExternalCommands(message) {
+  const commands = [];
+  const pushCommand = (target, command) => {
+    if (!target || !command) return;
+    const vx = Number(command.vx);
+    const vy = Number(command.vy);
+    if (!Number.isFinite(vx) || !Number.isFinite(vy)) return;
+    commands.push({ target: String(target), vx, vy });
+  };
+
+  if (message.commands && typeof message.commands === "object" && !Array.isArray(message.commands)) {
+    for (const [target, command] of Object.entries(message.commands)) pushCommand(target, command);
+  }
+  if (Array.isArray(message.commands)) {
+    for (const command of message.commands) {
+      pushCommand(command.target ?? command.label ?? command.car ?? command.carId, command);
+    }
+  }
+  if (message.type === "command") {
+    pushCommand(message.target ?? message.label ?? message.car ?? message.carId, message);
+  }
+  return commands;
+}
+
+function applyExternalMessage(raw) {
+  let message;
+  try {
+    message = JSON.parse(raw);
+  } catch {
+    setExternalStatus("Ignored non-JSON controller message.");
+    return;
+  }
+
+  if (message.type === "getFrame" || message.type === "requestFrame") {
+    sendExternalFrame();
+    return;
+  }
+
+  const commands = normalizeExternalCommands(message);
+  if (!commands.length) return;
+  for (const command of commands) {
+    state.external.commands.set(command.target, { vx: command.vx, vy: command.vy });
+  }
+  setExternalStatus(`Connected. ${commands.length} command${commands.length === 1 ? "" : "s"} received.`);
+}
+
+function disconnectExternalController(message = "Disconnected") {
+  if (state.external.socket) {
+    state.external.socket.onclose = null;
+    state.external.socket.close();
+  }
+  state.external.socket = null;
+  state.external.connected = false;
+  state.external.commands.clear();
+  externalConnectButton.textContent = "Connect";
+  setExternalStatus(message);
+}
+
+function connectExternalController() {
+  if (state.external.socket) {
+    disconnectExternalController();
+    return;
+  }
+  if (!ensureDefaultExternalHdv()) return;
+
+  const url = externalUrlInput.value.trim() || "ws://127.0.0.1:8765";
+  let socket;
+  try {
+    socket = new WebSocket(url);
+  } catch (error) {
+    setExternalStatus(`Invalid URL: ${error.message}`);
+    return;
+  }
+
+  state.external.socket = socket;
+  externalConnectButton.textContent = "Disconnect";
+  setExternalStatus("Connecting...");
+
+  socket.addEventListener("open", () => {
+    state.external.connected = true;
+    socket.send(JSON.stringify({ type: "hello", api: "ids3c.external-control.v1" }));
+    sendExternalFrame();
+    setExternalStatus("Connected. Sending frames.");
+  });
+  socket.addEventListener("message", (event) => applyExternalMessage(event.data));
+  socket.addEventListener("error", () => {
+    setExternalStatus("Connection error. Is the local controller running?");
+  });
+  socket.addEventListener("close", () => {
+    state.external.socket = null;
+    state.external.connected = false;
+    state.external.commands.clear();
+    externalConnectButton.textContent = "Connect";
+    setExternalStatus("Disconnected");
+  });
+}
+
 function tick(nowMs) {
   if (!state.playing) return;
   const elapsed = state.lastTickMs ? (nowMs - state.lastTickMs) / 1000 : 0;
@@ -2362,6 +2580,7 @@ function tick(nowMs) {
     setCollisionStatusIfNeeded();
   }
   draw();
+  sendExternalFrame();
   if (advanced !== false && state.playing) requestAnimationFrame(tick);
 }
 
@@ -2501,6 +2720,8 @@ errorCloseButton.addEventListener("click", hideError);
 errorDialog.addEventListener("click", (event) => {
   if (event.target === errorDialog) hideError();
 });
+
+externalConnectButton.addEventListener("click", connectExternalController);
 
 hdvVersionSelect.addEventListener("change", () => {
   state.hdv.version = selectedHdvVersion();
