@@ -211,6 +211,11 @@ input[type="file"] {
   min-height: 18px;
 }
 
+.steering-label,
+#hdvSteeringSlider {
+  grid-column: 1 / -1;
+}
+
 canvas.is-placing-hdv {
   cursor: crosshair;
 }

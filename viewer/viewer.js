@@ -98,6 +98,7 @@ const carsInput = document.querySelector("#carsInput");
 const experimentInput = document.querySelector("#experimentInput");
 const hdvVersionSelect = document.querySelector("#hdvVersionSelect");
 const placeHdvButton = document.querySelector("#placeHdvButton");
+const hdvSteeringSlider = document.querySelector("#hdvSteeringSlider");
 const errorDialog = document.querySelector("#errorDialog");
 const errorMessage = document.querySelector("#errorMessage");
 const errorCloseButton = document.querySelector("#errorCloseButton");
@@ -120,7 +121,7 @@ const state = {
   hdv: {
     placing: false,
     version: "manta",
-    mouseWorld: null,
+    steeringDeg: 0,
     keys: {
       w: false,
       s: false,
@@ -934,23 +935,16 @@ class HumanDrivenController {
       this.targetSpeed = clamp(this.targetSpeed + throttle * HDV_SPEED_RATE * dt, HDV_SPEED_MIN, HDV_SPEED_MAX);
     }
 
-    if (state.hdv.mouseWorld) {
-      const dx = state.hdv.mouseWorld.x - pose.x;
-      const dy = state.hdv.mouseWorld.y - pose.y;
-      if (Math.hypot(dx, dy) > 1e-5) {
-        const pointerAngle = Math.atan2(dy, dx);
-        this.steeringDeg = clamp(
-          wrapAngle(pointerAngle - pose.theta) * 180 / Math.PI,
-          this.hardware.steeringMinDeg,
-          this.hardware.steeringMaxDeg,
-        );
-      }
-    }
+    this.steeringDeg = clamp(
+      state.hdv.steeringDeg,
+      this.hardware.steeringMinDeg,
+      this.hardware.steeringMaxDeg,
+    );
 
     return {
       velocity: this.targetSpeed,
       steeringDeg: this.steeringDeg,
-      desired: state.hdv.mouseWorld ? { ...state.hdv.mouseWorld } : { x: pose.x, y: pose.y },
+      desired: { x: pose.x, y: pose.y },
     };
   }
 }
@@ -2301,6 +2295,7 @@ function setHdvPlacing(placing) {
 
 function updateHdvPanel() {
   const vehicle = state.runtime?.humanVehicle?.();
+  syncHdvSteeringSliderRange();
   if (state.hdv.placing) {
     placeHdvButton.textContent = "Cancel";
   } else if (vehicle) {
@@ -2308,6 +2303,22 @@ function updateHdvPanel() {
   } else {
     placeHdvButton.textContent = "Place";
   }
+}
+
+function syncHdvSteeringSliderRange() {
+  const hardware = hardwareFor({ version: selectedHdvVersion() });
+  hdvSteeringSlider.min = String(hardware.steeringMinDeg);
+  hdvSteeringSlider.max = String(hardware.steeringMaxDeg);
+  hdvSteeringSlider.value = String(clamp(Number(hdvSteeringSlider.value) || 0, hardware.steeringMinDeg, hardware.steeringMaxDeg));
+  state.hdv.steeringDeg = -(Number(hdvSteeringSlider.value) || 0);
+}
+
+function resetHdvSteering() {
+  state.hdv.steeringDeg = 0;
+  hdvSteeringSlider.value = "0";
+  const vehicle = state.runtime?.humanVehicle?.();
+  if (vehicle?.controller instanceof HumanDrivenController) vehicle.controller.steeringDeg = 0;
+  draw();
 }
 
 function ensureRuntimeForHdv() {
@@ -2341,7 +2352,7 @@ function tick(nowMs) {
   const advanced = state.runtime?.step(Math.min(0.08, elapsed * Number(speedSelect.value)));
   if (state.runtime?.collision.hasCollision) {
     state.playing = false;
-    playButton.textContent = "Play";
+    playButton.textContent = "Start";
     setCollisionStatusIfNeeded();
   }
   draw();
@@ -2379,7 +2390,7 @@ function loadMapOnly(linesText, arcsText) {
   state.bounds = computeBounds();
   state.playing = false;
   state.lastTickMs = 0;
-  playButton.textContent = "Play";
+  playButton.textContent = "Start";
   timeSlider.value = "0";
   setHdvPlacing(false);
   refreshHdvOptions();
@@ -2401,7 +2412,7 @@ function loadRuntime(linesText, arcsText, carsText, experimentText) {
     state.bounds = computeBounds();
     state.playing = false;
     state.lastTickMs = 0;
-    playButton.textContent = "Play";
+    playButton.textContent = "Start";
     timeSlider.value = "1";
     setHdvPlacing(false);
     draw();
@@ -2466,11 +2477,11 @@ async function refreshFromUploads() {
 
 playButton.addEventListener("click", () => {
   if (!state.runtime) {
-    showError(missingRuntimeMessage("Play"));
+    showError(missingRuntimeMessage("Start"));
     return;
   }
   state.playing = !state.playing;
-  playButton.textContent = state.playing ? "Pause" : "Play";
+  playButton.textContent = state.playing ? "Pause" : "Start";
   state.lastTickMs = 0;
   if (state.playing) {
     state.runtime.commitHistoryCursor();
@@ -2488,11 +2499,24 @@ errorDialog.addEventListener("click", (event) => {
 hdvVersionSelect.addEventListener("change", () => {
   state.hdv.version = selectedHdvVersion();
   state.runtime?.setHumanVehicleVersion(state.hdv.version);
+  resetHdvSteering();
   const vehicle = state.runtime?.humanVehicle?.();
   if (vehicle) {
     setStatus(`${selectedHdvTemplate().label} placed.`);
   }
   draw();
+});
+
+hdvSteeringSlider.addEventListener("input", () => {
+  state.hdv.steeringDeg = -(Number(hdvSteeringSlider.value) || 0);
+});
+
+hdvSteeringSlider.addEventListener("change", resetHdvSteering);
+hdvSteeringSlider.addEventListener("pointerup", resetHdvSteering);
+hdvSteeringSlider.addEventListener("keyup", (event) => {
+  if (event.key === "ArrowLeft" || event.key === "ArrowRight" || event.key === "Home" || event.key === "End") {
+    resetHdvSteering();
+  }
 });
 
 placeHdvButton.addEventListener("click", () => {
@@ -2514,16 +2538,6 @@ placeHdvButton.addEventListener("click", () => {
   setStatus("Click the map to place the human-driven vehicle.");
 });
 
-canvas.addEventListener("mousemove", (event) => {
-  const point = eventWorldPoint(event);
-  if (!point) return;
-  state.hdv.mouseWorld = point;
-});
-
-canvas.addEventListener("mouseleave", () => {
-  state.hdv.mouseWorld = null;
-});
-
 canvas.addEventListener("click", (event) => {
   if (!state.hdv.placing) return;
   const point = eventWorldPoint(event);
@@ -2534,7 +2548,7 @@ window.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && !errorDialog.hidden) hideError();
   const target = event.target;
   const isTyping = target instanceof HTMLInputElement || target instanceof HTMLSelectElement || target instanceof HTMLTextAreaElement;
-  if (isTyping) return;
+  if (isTyping && target !== hdvSteeringSlider) return;
   const key = event.key.toLowerCase();
   if (key === "w") state.hdv.keys.w = true;
   else if (key === "s") state.hdv.keys.s = true;
@@ -2560,7 +2574,7 @@ resetButton.addEventListener("click", () => {
     return;
   }
   state.playing = false;
-  playButton.textContent = "Play";
+  playButton.textContent = "Start";
   state.runtime.reset();
   timeSlider.value = "1";
   setStatus(collisionStatusText() || "Simulation reset.");
@@ -2570,7 +2584,7 @@ resetButton.addEventListener("click", () => {
 timeSlider.addEventListener("input", () => {
   if (!state.runtime) return;
   state.playing = false;
-  playButton.textContent = "Play";
+  playButton.textContent = "Start";
   state.runtime.restoreHistoryPercent(Number(timeSlider.value));
   setStatus(collisionStatusText() || "Simulation paused.");
   draw();
