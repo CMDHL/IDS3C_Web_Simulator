@@ -11,6 +11,11 @@ Open the viewer, run a local WebSocket server, then connect to
 placed yet, connecting creates a default `manta` HDV on the map so the API can
 be tested without a Cars.yaml file.
 
+GitHub Pages only serves the HTML, CSS, and JavaScript files. The code runs in
+your local browser, and the `ws://127.0.0.1:8765` connection is made by your
+browser on your machine, not by GitHub's servers. GitHub's servers do not
+directly access your local controller.
+
 Viewer-to-controller frame messages look like:
 
 ```json
@@ -58,5 +63,7 @@ Run the dependency-free Python starter controller with:
 ```sh
 python3 examples/external_controller.py
 ```
+
+## Development notes
 
 Some code and documentation in this repository were developed with assistance from ChatGPT, and were reviewed and modified before use.
