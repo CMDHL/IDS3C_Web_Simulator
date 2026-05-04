@@ -62,7 +62,6 @@ const CAR_ORIGIN_REARWARD_OFFSET = 0.02;
 const COLLISION_CELL_SIZE = 0.35;
 const INTERSECTION_QUEUE_DISTANCE = 0.20;
 const CONTROL_ZONE_CAR_LENGTH_ALLOWANCE = 0.1;
-const HDV_ID = -1;
 const HDV_SPEED_MIN = -1;
 const HDV_SPEED_MAX = 1;
 const HDV_SPEED_RATE = 0.8;
@@ -662,8 +661,8 @@ function hardwareFor(config) {
 
 function defaultHdvTemplates() {
   return [
-    { id: HDV_ID, key: "HumanDrivenVehicle", version: "lotus", label: "lotus", source: "default", listedHdv: false },
-    { id: HDV_ID, key: "HumanDrivenVehicle", version: "manta", label: "manta", source: "default", listedHdv: false },
+    { id: "lotus", key: "HumanDrivenVehicle", version: "lotus", label: "lotus", source: "default", listedHdv: false },
+    { id: "manta", key: "HumanDrivenVehicle", version: "manta", label: "manta", source: "default", listedHdv: false },
   ];
 }
 
@@ -717,9 +716,9 @@ function refreshHdvOptions(preferScenarioHdv = false) {
 }
 
 function humanVehicleConfig(template = selectedHdvTemplate(), segmentId = "") {
-  if (typeof template === "string") template = { id: HDV_ID, key: "HumanDrivenVehicle", version: template };
+  if (typeof template === "string") template = { id: template, key: "HumanDrivenVehicle", version: template };
   return {
-    id: template.id ?? HDV_ID,
+    id: template.id ?? template.version ?? "manta",
     key: template.key || "HumanDrivenVehicle",
     version: template.version || "manta",
     mode: "HDV",
@@ -917,12 +916,7 @@ function interpolateProfile(times = [], speeds = [], t) {
 
 function externalCommandForVehicle(vehicle) {
   if (!state.external.connected || vehicle.config.mode !== "HDV") return null;
-  const labels = externalVehicleAliases(vehicle);
-  for (const label of labels) {
-    const command = state.external.commands.get(label);
-    if (command) return command;
-  }
-  return null;
+  return state.external.commands.get(vehicleLabel(vehicle)) || null;
 }
 
 function controlFromVelocityCommand(command, pose, hardware) {
@@ -1114,7 +1108,7 @@ class SimVehicle {
 
   applyHumanTemplate(template) {
     if (this.config.mode !== "HDV") return;
-    this.id = template.id ?? HDV_ID;
+    this.id = template.id ?? template.version ?? "manta";
     this.config.id = this.id;
     this.config.key = template.key || this.config.key || "HumanDrivenVehicle";
     this.config.listedHdv = Boolean(template.listedHdv);
@@ -2000,8 +1994,7 @@ function detectVehicleCollisions(vehicles) {
         const key = cellKey(cellX, cellY);
         const occupants = grid.get(key) || [];
         for (const other of occupants) {
-          const low = Math.min(rect.vehicle.id, other.vehicle.id);
-          const high = Math.max(rect.vehicle.id, other.vehicle.id);
+          const [low, high] = [String(rect.vehicle.id), String(other.vehicle.id)].sort();
           const pairKey = `${low}:${high}`;
           if (tested.has(pairKey)) continue;
           tested.add(pairKey);
@@ -2210,18 +2203,8 @@ function drawRouteHighlights(project) {
 }
 
 function vehicleLabel(vehicle) {
-  if (vehicle.config.mode === "HDV" && !vehicle.config.listedHdv) return vehicle.hardware.version;
+  if (String(vehicle.id) === vehicle.hardware.version) return String(vehicle.id);
   return `${vehicle.hardware.version}_${vehicle.id}`;
-}
-
-function externalVehicleAliases(vehicle) {
-  const aliases = new Set([vehicleLabel(vehicle), String(vehicle.id)]);
-  if (vehicle.config.mode === "HDV") {
-    aliases.add(vehicle.hardware.version);
-    aliases.add(`${vehicle.hardware.version}_${vehicle.id}`);
-  }
-  if (vehicle.config.label) aliases.add(vehicle.config.label);
-  return [...aliases];
 }
 
 function vehicleLabelById(id) {
@@ -2236,7 +2219,7 @@ function drawVehicle(vehicle, index, project) {
   const width = vehicle.hardware.width * scale;
   const originOffset = Math.min(CAR_ORIGIN_REARWARD_OFFSET, vehicle.hardware.length) * scale;
   const theta = -vehicle.pose.theta + Math.PI;
-  const collided = state.runtime?.collision.vehicleIds.has(vehicle.id);
+  const collided = state.runtime?.collision.vehicleIds.has(String(vehicle.id));
   const isHdv = vehicle.config.mode === "HDV";
 
   ctx.save();
@@ -2269,11 +2252,9 @@ function drawVehicle(vehicle, index, project) {
     ctx.stroke();
   }
 
-  if (!isHdv || vehicle.config.listedHdv) {
-    ctx.font = "13px ui-sans-serif, system-ui, sans-serif";
-    ctx.fillStyle = "#172026";
-    ctx.fillText(vehicleLabel(vehicle), origin.x + 9, origin.y - 9);
-  }
+  ctx.font = "13px ui-sans-serif, system-ui, sans-serif";
+  ctx.fillStyle = "#172026";
+  ctx.fillText(vehicleLabel(vehicle), origin.x + 9, origin.y - 9);
 }
 
 function drawHdvSteeringCue(vehicle, project) {
@@ -2436,24 +2417,27 @@ function ensureDefaultExternalHdv() {
 
 function externalFrame() {
   const runtime = state.runtime;
-  const cars = (runtime?.vehicles || []).map((vehicle) => {
+  const cars = {};
+  for (const vehicle of runtime?.vehicles || []) {
     const speed = vehicle.pose.v || 0;
     const vx = speed * Math.cos(vehicle.pose.theta);
     const vy = speed * Math.sin(vehicle.pose.theta);
-    return {
+    const name = vehicleLabel(vehicle);
+    cars[name] = {
       id: vehicle.id,
-      label: vehicleLabel(vehicle),
-      aliases: externalVehicleAliases(vehicle),
+      label: name,
       mode: vehicle.config.mode,
       model: vehicle.hardware.version,
       x: vehicle.pose.x,
       y: vehicle.pose.y,
+      yaw: vehicle.pose.theta,
       vx,
       vy,
       speed,
+      yawRate: vehicle.pose.yawRate || 0,
       segmentId: vehicle.route[vehicle.segmentIndex] || "",
     };
-  });
+  }
   return {
     type: "frame",
     seq: ++state.external.frameSeq,

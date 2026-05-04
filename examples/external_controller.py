@@ -98,7 +98,7 @@ def send_ws_text(conn, text):
 
 
 def command_for_frame(frame):
-    car = next((item for item in frame.get("cars", []) if TARGET in item.get("aliases", [])), None)
+    car = frame.get("cars", {}).get(TARGET)
     if not car:
         return {"type": "getFrame"}
 

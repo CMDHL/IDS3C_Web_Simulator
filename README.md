@@ -22,16 +22,16 @@ Viewer-to-controller frame messages look like:
 {
   "type": "frame",
   "time": 1.23,
-  "cars": [
-    {
-      "label": "manta",
-      "aliases": ["manta", "-1", "manta_-1"],
+  "cars": {
+    "manta_101": {
+      "label": "manta_101",
       "x": 0.1,
       "y": -0.2,
+      "yaw": 1.57,
       "vx": 0.0,
       "vy": 0.3
     }
-  ]
+  }
 }
 ```
 
@@ -41,15 +41,13 @@ The controller can also request one current frame at any time:
 { "type": "getFrame" }
 ```
 
-Controller-to-viewer command messages target HDVs by label or alias. HDVs
-declared in Cars.yaml use labels like `manta_101`; the default test HDV uses
-`manta`.
+Controller-to-viewer command messages target HDVs by full car name. HDVs
+declared in Cars.yaml use names like `manta_101`.
 
 ```json
 {
   "type": "command",
   "commands": {
-    "manta": { "vx": 0.3, "vy": 0.0 },
     "manta_101": { "vx": 0.0, "vy": -0.2 }
   }
 }
