@@ -2344,6 +2344,12 @@ function setHdvPlacing(placing) {
   updateHdvPanel();
 }
 
+function setPlaying(playing) {
+  state.playing = playing;
+  playButton.textContent = playing ? "Pause" : "Start";
+  playButton.classList.toggle("is-playing", playing);
+}
+
 function updateHdvPanel() {
   const vehicle = state.runtime?.humanVehicle?.();
   syncHdvSteeringSliderRange();
@@ -2559,8 +2565,7 @@ function tick(nowMs) {
   state.lastTickMs = nowMs;
   const advanced = state.runtime?.step(Math.min(0.08, elapsed * Number(speedSelect.value)));
   if (state.runtime?.collision.hasCollision) {
-    state.playing = false;
-    playButton.textContent = "Start";
+    setPlaying(false);
     setCollisionStatusIfNeeded();
   }
   draw();
@@ -2597,9 +2602,8 @@ function loadMapOnly(linesText, arcsText) {
   state.experiment = null;
   state.runtime = null;
   state.bounds = computeBounds();
-  state.playing = false;
+  setPlaying(false);
   state.lastTickMs = 0;
-  playButton.textContent = "Start";
   timeSlider.value = "0";
   setHdvPlacing(false);
   refreshHdvOptions();
@@ -2619,15 +2623,15 @@ function loadRuntime(linesText, arcsText, carsText, experimentText) {
     validateScenarioInputs(state.map, state.scenario, state.experiment);
     state.runtime = new SimulationRuntime(state.map, state.scenario);
     state.bounds = computeBounds();
-    state.playing = false;
+    setPlaying(false);
     state.lastTickMs = 0;
-    playButton.textContent = "Start";
     timeSlider.value = "1";
     setHdvPlacing(false);
     draw();
     return true;
   } catch (error) {
     state.runtime = null;
+    setPlaying(false);
     draw();
     showError(`Could not load this experiment. ${error.message}`);
     console.error(error);
@@ -2689,8 +2693,7 @@ playButton.addEventListener("click", () => {
     showError(missingRuntimeMessage("Start"));
     return;
   }
-  state.playing = !state.playing;
-  playButton.textContent = state.playing ? "Pause" : "Start";
+  setPlaying(!state.playing);
   state.lastTickMs = 0;
   if (state.playing) {
     state.runtime.commitHistoryCursor();
@@ -2784,8 +2787,7 @@ resetButton.addEventListener("click", () => {
     showError(missingRuntimeMessage("Reset"));
     return;
   }
-  state.playing = false;
-  playButton.textContent = "Start";
+  setPlaying(false);
   state.runtime.reset();
   timeSlider.value = "1";
   setStatus(collisionStatusText() || "Simulation reset.");
@@ -2794,8 +2796,7 @@ resetButton.addEventListener("click", () => {
 
 timeSlider.addEventListener("input", () => {
   if (!state.runtime) return;
-  state.playing = false;
-  playButton.textContent = "Start";
+  setPlaying(false);
   state.runtime.restoreHistoryPercent(Number(timeSlider.value));
   setStatus(collisionStatusText() || "Simulation paused.");
   draw();

@@ -205,7 +205,8 @@ input[type="file"] {
   line-height: 1.35;
 }
 
-#placeHdvButton.is-placing {
+#placeHdvButton.is-placing,
+#playButton.is-playing {
   border-color: #216fb8;
   background: #e6f2ff;
   color: #124f86;
