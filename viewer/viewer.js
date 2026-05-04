@@ -33,9 +33,9 @@ const HARDWARE = {
   },
   manta: {
     default: {
-      length: 0.18,
+      length: 0.2,
       width: 0.1,
-      wheelbase: 0.05,
+      wheelbase: 0.12,
       steeringMinDeg: -45,
       steeringMaxDeg: 45,
       sk: 6.0,
@@ -1044,11 +1044,10 @@ class SimVehicle {
   }
 
   transitionIfNeeded(map) {
-    let segment = this.currentSegment(map);
-    while (this.r >= segment.length) {
+    const segment = this.currentSegment(map);
+    if (this.r >= segment.length) {
       this.segmentIndex = (this.segmentIndex + 1) % this.route.length;
       this.r = 0.01;
-      segment = this.currentSegment(map);
     }
     this.routeDistance = routeDistanceFromIndex(map, this.route, this.segmentIndex, this.r);
   }
@@ -1360,7 +1359,6 @@ class SimulationRuntime {
       const current = vehicle.currentSegment(this.map);
       vehicle.r = clamp(current.project(vehicle.pose), 0, current.length);
       vehicle.routeDistance = routeDistanceFromIndex(this.map, vehicle.route, vehicle.segmentIndex, vehicle.r);
-      if (vehicle.config.mode !== "HDV") vehicle.transitionIfNeeded(this.map);
     }
   }
 
@@ -1865,10 +1863,9 @@ function emptyCollision() {
 function integrateVehiclePose(vehicle, steeringDeg, dt) {
   const steering = steeringDeg * Math.PI / 180;
   const wheelbase = Math.max(vehicle.hardware.wheelbase, 1e-4);
-  vehicle.pose.yawRate = vehicle.pose.v / wheelbase * Math.sin(steering);
-  const travelTheta = vehicle.pose.theta + steering;
-  vehicle.pose.x += vehicle.pose.v * Math.cos(travelTheta) * dt;
-  vehicle.pose.y += vehicle.pose.v * Math.sin(travelTheta) * dt;
+  vehicle.pose.yawRate = vehicle.pose.v / wheelbase * Math.tan(steering);
+  vehicle.pose.x += vehicle.pose.v * Math.cos(vehicle.pose.theta) * dt;
+  vehicle.pose.y += vehicle.pose.v * Math.sin(vehicle.pose.theta) * dt;
   vehicle.pose.theta = wrapAngle(vehicle.pose.theta + vehicle.pose.yawRate * dt);
 }
 

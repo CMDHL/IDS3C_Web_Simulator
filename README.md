@@ -16,6 +16,9 @@ your local browser, and the `ws://127.0.0.1:8765` connection is made by your
 browser on your machine, not by GitHub's servers. GitHub's servers do not
 directly access your local controller.
 
+There is no native C++ runtime in the viewer. The simulator state, controllers,
+and vehicle dynamics all run in `viewer/viewer.js`.
+
 Viewer-to-controller frame messages look like:
 
 ```json
