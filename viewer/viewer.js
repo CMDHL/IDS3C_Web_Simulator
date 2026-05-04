@@ -100,7 +100,7 @@ const placeHdvButton = document.querySelector("#placeHdvButton");
 const hdvSteeringSlider = document.querySelector("#hdvSteeringSlider");
 const externalUrlInput = document.querySelector("#externalUrlInput");
 const externalConnectButton = document.querySelector("#externalConnectButton");
-const externalStatus = document.querySelector("#externalStatus");
+const externalCommandLockInput = document.querySelector("#externalCommandLockInput");
 const errorDialog = document.querySelector("#errorDialog");
 const errorMessage = document.querySelector("#errorMessage");
 const errorCloseButton = document.querySelector("#errorCloseButton");
@@ -134,6 +134,8 @@ const state = {
     socket: null,
     connected: false,
     frameSeq: 0,
+    commandLock: false,
+    awaitingCommand: false,
     commands: new Map(),
     lastError: "",
   },
@@ -2487,10 +2489,9 @@ function sendExternalFrame() {
   const socket = state.external.socket;
   if (!socket || socket.readyState !== WebSocket.OPEN) return;
   socket.send(JSON.stringify(externalFrame()));
-}
-
-function setExternalStatus(message) {
-  externalStatus.textContent = message;
+  if (state.external.commandLock && state.external.connected) {
+    state.external.awaitingCommand = true;
+  }
 }
 
 function normalizeExternalCommands(message) {
@@ -2553,7 +2554,6 @@ function applyExternalMessage(raw) {
   try {
     message = JSON.parse(raw);
   } catch {
-    setExternalStatus("Ignored non-JSON controller message.");
     return;
   }
 
@@ -2574,24 +2574,21 @@ function applyExternalMessage(raw) {
   }
   if (!appliedTeleports && !commands.length) return;
 
+  state.external.awaitingCommand = false;
   draw();
-  sendExternalFrame();
-  const parts = [];
-  if (commands.length) parts.push(`${commands.length} command${commands.length === 1 ? "" : "s"}`);
-  if (appliedTeleports) parts.push(`${appliedTeleports} teleport${appliedTeleports === 1 ? "" : "s"}`);
-  setExternalStatus(`Connected. ${parts.join(" and ")} received.`);
+  if (!state.external.commandLock) sendExternalFrame();
 }
 
-function disconnectExternalController(message = "Disconnected") {
+function disconnectExternalController() {
   if (state.external.socket) {
     state.external.socket.onclose = null;
     state.external.socket.close();
   }
   state.external.socket = null;
   state.external.connected = false;
+  state.external.awaitingCommand = false;
   state.external.commands.clear();
   externalConnectButton.textContent = "Connect";
-  setExternalStatus(message);
 }
 
 function connectExternalController() {
@@ -2606,38 +2603,41 @@ function connectExternalController() {
   try {
     socket = new WebSocket(url);
   } catch (error) {
-    setExternalStatus(`Invalid URL: ${error.message}`);
+    showError(`Invalid external controller URL. ${error.message}`);
     return;
   }
 
   state.external.socket = socket;
   externalConnectButton.textContent = "Disconnect";
-  setExternalStatus("Connecting...");
 
   socket.addEventListener("open", () => {
     state.external.connected = true;
     socket.send(JSON.stringify({ type: "hello", api: "ids3c.external-control.v1" }));
     sendExternalFrame();
-    setExternalStatus("Connected. Sending frames.");
   });
   socket.addEventListener("message", (event) => applyExternalMessage(event.data));
-  socket.addEventListener("error", () => {
-    setExternalStatus("Connection error. Is the local controller running?");
-  });
   socket.addEventListener("close", () => {
     state.external.socket = null;
     state.external.connected = false;
+    state.external.awaitingCommand = false;
     state.external.commands.clear();
     externalConnectButton.textContent = "Connect";
-    setExternalStatus("Disconnected");
   });
 }
 
 function tick(nowMs) {
   if (!state.playing) return;
+  if (state.external.commandLock && state.external.connected && state.external.awaitingCommand) {
+    state.lastTickMs = nowMs;
+    requestAnimationFrame(tick);
+    return;
+  }
   const elapsed = state.lastTickMs ? (nowMs - state.lastTickMs) / 1000 : 0;
   state.lastTickMs = nowMs;
-  const advanced = state.runtime?.step(Math.min(0.08, elapsed * Number(speedSelect.value)));
+  const dt = state.external.commandLock && state.external.connected
+    ? MAINFRAME_DT
+    : Math.min(0.08, elapsed * Number(speedSelect.value));
+  const advanced = state.runtime?.step(dt);
   if (state.runtime?.collision.hasCollision) {
     setPlaying(false);
     setCollisionStatusIfNeeded();
@@ -2783,6 +2783,14 @@ errorDialog.addEventListener("click", (event) => {
 });
 
 externalConnectButton.addEventListener("click", connectExternalController);
+
+externalCommandLockInput.addEventListener("change", () => {
+  state.external.commandLock = externalCommandLockInput.checked;
+  state.external.awaitingCommand = false;
+  if (state.external.commandLock && state.external.connected) {
+    sendExternalFrame();
+  }
+});
 
 hdvVersionSelect.addEventListener("change", () => {
   state.hdv.version = selectedHdvVersion();

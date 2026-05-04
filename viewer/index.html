@@ -58,7 +58,10 @@
           <h2>External Controller</h2>
           <input id="externalUrlInput" type="url" value="ws://127.0.0.1:8765" aria-label="External controller WebSocket URL">
           <button id="externalConnectButton" type="button">Connect</button>
-          <p id="externalStatus">Disconnected</p>
+          <label class="external-checkbox" title="Wait for an external command before advancing each frame.">
+            <input id="externalCommandLockInput" type="checkbox">
+            <span>Synchronize Frames</span>
+          </label>
         </div>
       </section>
 

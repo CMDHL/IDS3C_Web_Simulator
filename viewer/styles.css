@@ -232,7 +232,7 @@ canvas.is-placing-hdv {
   gap: 9px;
 }
 
-.external-panel input {
+.external-panel input[type="url"] {
   min-width: 0;
   min-height: 32px;
   padding: 0 8px;
@@ -242,9 +242,25 @@ canvas.is-placing-hdv {
   color: #172026;
 }
 
-#externalStatus {
+.external-checkbox {
   grid-column: 1 / -1;
-  min-height: 18px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: #44525a;
+  font-size: 0.82rem;
+  line-height: 1.2;
+  cursor: pointer;
+}
+
+.external-checkbox input {
+  width: 15px;
+  height: 15px;
+  min-width: 15px;
+  min-height: 15px;
+  margin: 0;
+  padding: 0;
+  cursor: pointer;
 }
 
 .modal {
