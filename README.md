@@ -59,6 +59,33 @@ declared in Cars.yaml use names like `manta_101`.
 The browser converts `vx, vy` into the simulator's car-like speed and steering
 commands, then clamps those commands to the selected HDV hardware limits.
 
+The controller can also teleport an HDV to a global pose. `yaw` is in radians.
+The simulator places the vehicle at the exact requested `(x, y, yaw)`, resets
+its speed to zero, and associates it with the nearest map segment for future
+simulation steps. A top-level teleport without `target` applies to the current
+ego HDV.
+
+```json
+{
+  "type": "teleport",
+  "target": "manta_101",
+  "x": 0.4,
+  "y": -0.1,
+  "yaw": 1.57
+}
+```
+
+Teleport requests can also be batched:
+
+```json
+{
+  "type": "command",
+  "commands": {
+    "manta_101": { "teleport": { "x": 0.4, "y": -0.1, "yaw": 1.57 } }
+  }
+}
+```
+
 Run the dependency-free Python starter controller with:
 
 ```sh

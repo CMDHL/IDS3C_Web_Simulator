@@ -919,6 +919,10 @@ function externalCommandForVehicle(vehicle) {
   return state.external.commands.get(vehicleLabel(vehicle)) || null;
 }
 
+function externalTargetForMessage(message) {
+  return message.target ?? message.label ?? message.car ?? message.carId;
+}
+
 function controlFromVelocityCommand(command, pose, hardware) {
   const vx = Number(command.vx);
   const vy = Number(command.vy);
@@ -1196,6 +1200,36 @@ class SimulationRuntime {
     vehicle.applyHumanTemplate({ ...selectedHdvTemplate(), version });
     this.updateCollisionState();
     this.recordHistory();
+  }
+
+  teleportHumanVehicle(target, pose) {
+    const vehicle = target
+      ? this.vehicles.find((item) => item.config.mode === "HDV" && vehicleLabel(item) === target)
+      : this.humanVehicle();
+    if (!vehicle) return false;
+    const match = closestMapSegment(pose);
+    if (match) {
+      vehicle.config.route = [match.segment.id];
+      vehicle.route = [match.segment.id];
+      vehicle.segmentIndex = 0;
+      vehicle.r = match.r;
+      vehicle.routeDistance = match.r;
+    }
+    vehicle.pose.x = pose.x;
+    vehicle.pose.y = pose.y;
+    vehicle.pose.theta = wrapAngle(pose.yaw);
+    vehicle.pose.v = 0;
+    vehicle.pose.yawRate = 0;
+    vehicle.desired = { x: pose.x, y: pose.y };
+    vehicle.control = { velocity: 0, steeringDeg: 0, desired: { ...vehicle.desired } };
+    if (vehicle.controller instanceof HumanDrivenController) {
+      vehicle.controller.targetSpeed = 0;
+      vehicle.controller.steeringDeg = 0;
+    }
+    state.external.commands.delete(vehicleLabel(vehicle));
+    this.updateCollisionState();
+    this.recordHistory();
+    return true;
   }
 
   step(dt) {
@@ -2474,13 +2508,44 @@ function normalizeExternalCommands(message) {
   }
   if (Array.isArray(message.commands)) {
     for (const command of message.commands) {
-      pushCommand(command.target ?? command.label ?? command.car ?? command.carId, command);
+      pushCommand(externalTargetForMessage(command), command);
     }
   }
   if (message.type === "command") {
-    pushCommand(message.target ?? message.label ?? message.car ?? message.carId, message);
+    pushCommand(externalTargetForMessage(message), message);
   }
   return commands;
+}
+
+function normalizeExternalTeleports(message) {
+  const teleports = [];
+  const pushTeleport = (target, pose) => {
+    if (!pose) return;
+    const x = Number(pose.x);
+    const y = Number(pose.y);
+    const yaw = Number(pose.yaw ?? pose.theta);
+    if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(yaw)) return;
+    teleports.push({ target: target ? String(target) : "", x, y, yaw });
+  };
+
+  if (message.teleports && typeof message.teleports === "object" && !Array.isArray(message.teleports)) {
+    for (const [target, pose] of Object.entries(message.teleports)) pushTeleport(target, pose);
+  }
+  if (Array.isArray(message.teleports)) {
+    for (const pose of message.teleports) pushTeleport(externalTargetForMessage(pose), pose);
+  }
+  if (message.commands && typeof message.commands === "object" && !Array.isArray(message.commands)) {
+    for (const [target, command] of Object.entries(message.commands)) {
+      pushTeleport(target, command.teleport ?? command);
+    }
+  }
+  if (Array.isArray(message.commands)) {
+    for (const command of message.commands) pushTeleport(externalTargetForMessage(command), command.teleport ?? command);
+  }
+  if (message.type === "teleport") {
+    pushTeleport(externalTargetForMessage(message), message);
+  }
+  return teleports;
 }
 
 function applyExternalMessage(raw) {
@@ -2497,12 +2562,24 @@ function applyExternalMessage(raw) {
     return;
   }
 
+  const teleports = normalizeExternalTeleports(message);
+  let appliedTeleports = 0;
+  for (const teleport of teleports) {
+    if (state.runtime?.teleportHumanVehicle(teleport.target, teleport)) appliedTeleports += 1;
+  }
+
   const commands = normalizeExternalCommands(message);
-  if (!commands.length) return;
   for (const command of commands) {
     state.external.commands.set(command.target, { vx: command.vx, vy: command.vy });
   }
-  setExternalStatus(`Connected. ${commands.length} command${commands.length === 1 ? "" : "s"} received.`);
+  if (!appliedTeleports && !commands.length) return;
+
+  draw();
+  sendExternalFrame();
+  const parts = [];
+  if (commands.length) parts.push(`${commands.length} command${commands.length === 1 ? "" : "s"}`);
+  if (appliedTeleports) parts.push(`${appliedTeleports} teleport${appliedTeleports === 1 ? "" : "s"}`);
+  setExternalStatus(`Connected. ${parts.join(" and ")} received.`);
 }
 
 function disconnectExternalController(message = "Disconnected") {
