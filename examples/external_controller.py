@@ -106,7 +106,6 @@ def command_for_frame(frame):
         return {
             "type": "spawn",
             "target": TARGET,
-            "model": "manta",
             "x": START_X,
             "y": START_Y,
             "yaw": START_YAW,

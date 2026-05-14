@@ -242,10 +242,9 @@ def load_map(map_dir):
 
 
 class RouteTracer:
-    def __init__(self, route, target, speed, lookahead, model="", spawn=True, stop_tolerance=0.05):
+    def __init__(self, route, target, speed, lookahead, spawn=True, stop_tolerance=0.05):
         self.route = route
         self.target = target
-        self.model = model
         self.speed = speed
         self.lookahead = lookahead
         self.stop_tolerance = stop_tolerance
@@ -269,8 +268,6 @@ class RouteTracer:
             "y": y,
             "yaw": self.route.tangent_yaw_at(0.0),
         }
-        if self.model:
-            command["model"] = self.model
         return command
 
     def command_for_frame(self, frame):
@@ -336,7 +333,6 @@ def build_arg_parser():
     parser.add_argument("--host", default=HOST)
     parser.add_argument("--port", default=PORT, type=int)
     parser.add_argument("--target", default=TARGET)
-    parser.add_argument("--model", default="", help="HDV model to spawn, such as lotus or manta; inferred from target when omitted")
     parser.add_argument("--speed", default=SPEED, type=float)
     parser.add_argument("--lookahead", default=LOOKAHEAD, type=float)
     parser.add_argument("--route", default=",".join(DEFAULT_ROUTE), help="comma-separated segment names")
@@ -360,7 +356,6 @@ def serve(args):
         args.target,
         args.speed,
         args.lookahead,
-        model=args.model,
         spawn=not args.no_spawn,
         stop_tolerance=args.stop_tolerance,
     )

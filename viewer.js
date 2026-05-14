@@ -927,12 +927,11 @@ function externalTargetForMessage(message) {
 
 function externalSpawnTemplate(message) {
   const target = externalTargetForMessage(message);
-  const requestedModel = message.model ?? message.version ?? message.typeName;
-  let version = requestedModel ? String(requestedModel).toLowerCase() : "";
+  let version = "";
   let id = message.id != null ? String(message.id) : "";
   let label = target ? String(target) : "";
 
-  if (!version && label) {
+  if (label) {
     const [prefix, ...rest] = label.split("_");
     if (HARDWARE[prefix]) {
       version = prefix;
@@ -946,8 +945,7 @@ function externalSpawnTemplate(message) {
       id = rest.length ? rest.join("_") : prefix;
     }
   }
-  if (!version) version = selectedHdvVersion();
-  if (!HARDWARE[version]) version = "manta";
+  if (!version) version = "manta";
   if (!id) id = label && label !== version ? label.replace(new RegExp(`^${version}_`), "") : version;
   if (!label) label = id === version ? version : `${version}_${id}`;
 

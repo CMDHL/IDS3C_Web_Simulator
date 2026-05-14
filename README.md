@@ -56,15 +56,14 @@ declared in Cars.yaml use names like `manta_101`; default external HDVs can use
 names like `manta` or `lotus`.
 
 An external controller can spawn the HDV at a global pose. Only one HDV is
-allowed at a time, so spawning replaces any existing HDV. `model` can be
-`manta` or `lotus`; if omitted, the viewer tries to infer it from `target`
-names like `lotus_101`.
+allowed at a time, so spawning replaces any existing HDV. The vehicle model is
+inferred from `target`: `manta` and `manta_101` spawn a manta; `lotus` and
+`lotus_101` spawn a lotus.
 
 ```json
 {
   "type": "spawn",
   "target": "lotus_101",
-  "model": "lotus",
   "x": 0.949,
   "y": -3.336,
   "yaw": 3.1416
@@ -134,7 +133,7 @@ Useful options:
 
 ```sh
 python3 examples/route_trace_controller.py --target manta --speed 0.32 --lookahead 0.18
-python3 examples/route_trace_controller.py --target lotus_101 --model lotus
+python3 examples/route_trace_controller.py --target lotus_101
 python3 examples/route_trace_controller.py --no-spawn
 python3 examples/route_trace_controller.py --loop
 ```
