@@ -1,7 +1,7 @@
 const SAMPLE_PATHS = {
-  lines: "../assets/default_map/NewLines.csv",
-  arcs: "../assets/default_map/NewArcs.csv",
-  background: "../assets/default_map/map.png",
+  lines: "assets/default_map/NewLines.csv",
+  arcs: "assets/default_map/NewArcs.csv",
+  background: "assets/default_map/map.png",
 };
 
 const MAP_BACKGROUND = {
@@ -134,7 +134,7 @@ const state = {
     socket: null,
     connected: false,
     frameSeq: 0,
-    commandLock: false,
+    commandLock: true,
     awaitingCommand: false,
     commands: new Map(),
     lastError: "",
@@ -925,6 +925,42 @@ function externalTargetForMessage(message) {
   return message.target ?? message.label ?? message.car ?? message.carId;
 }
 
+function externalSpawnTemplate(message) {
+  const target = externalTargetForMessage(message);
+  const requestedModel = message.model ?? message.version ?? message.typeName;
+  let version = requestedModel ? String(requestedModel).toLowerCase() : "";
+  let id = message.id != null ? String(message.id) : "";
+  let label = target ? String(target) : "";
+
+  if (!version && label) {
+    const [prefix, ...rest] = label.split("_");
+    if (HARDWARE[prefix]) {
+      version = prefix;
+      if (!id && rest.length) id = rest.join("_");
+    }
+  }
+  if (!version && id) {
+    const [prefix, ...rest] = id.split("_");
+    if (HARDWARE[prefix]) {
+      version = prefix;
+      id = rest.length ? rest.join("_") : prefix;
+    }
+  }
+  if (!version) version = selectedHdvVersion();
+  if (!HARDWARE[version]) version = "manta";
+  if (!id) id = label && label !== version ? label.replace(new RegExp(`^${version}_`), "") : version;
+  if (!label) label = id === version ? version : `${version}_${id}`;
+
+  return {
+    id,
+    key: "HumanDrivenVehicle",
+    version,
+    label,
+    source: "external",
+    listedHdv: false,
+  };
+}
+
 function controlFromVelocityCommand(command, pose, hardware) {
   const vx = Number(command.vx);
   const vy = Number(command.vy);
@@ -1202,6 +1238,28 @@ class SimulationRuntime {
     vehicle.applyHumanTemplate({ ...selectedHdvTemplate(), version });
     this.updateCollisionState();
     this.recordHistory();
+  }
+
+  spawnHumanVehicle(spawn) {
+    const match = closestMapSegment(spawn);
+    if (!match) return false;
+    this.removeHumanVehicle();
+    const template = externalSpawnTemplate(spawn);
+    this.vehicles.push(new SimVehicle(humanVehicleConfig(template, match.segment.id), this.map, match.r));
+    const vehicle = this.humanVehicle();
+    vehicle.pose.x = spawn.x;
+    vehicle.pose.y = spawn.y;
+    vehicle.pose.theta = wrapAngle(spawn.yaw);
+    vehicle.pose.v = 0;
+    vehicle.pose.yawRate = 0;
+    vehicle.desired = { x: spawn.x, y: spawn.y };
+    vehicle.control = { velocity: 0, steeringDeg: 0, desired: { ...vehicle.desired } };
+    vehicle.controller.targetSpeed = 0;
+    vehicle.controller.steeringDeg = 0;
+    state.external.commands.clear();
+    this.updateCollisionState();
+    this.recordHistory();
+    return true;
   }
 
   teleportHumanVehicle(target, pose) {
@@ -2424,6 +2482,19 @@ function ensureRuntimeForHdv() {
   return true;
 }
 
+function ensureRuntimeForExternalController() {
+  if (state.runtime) return true;
+  if (!state.map?.all().length) {
+    showError("Load a map before connecting an external controller.");
+    return false;
+  }
+  state.scenario = state.scenario || { vehicles: [] };
+  state.runtime = new SimulationRuntime(state.map, state.scenario);
+  state.bounds = computeBounds();
+  timeSlider.value = "1";
+  return true;
+}
+
 function placeHumanVehicleAt(point) {
   if (!ensureRuntimeForHdv()) return;
   const match = closestMapSegment(point);
@@ -2433,25 +2504,6 @@ function placeHumanVehicleAt(point) {
   setHdvPlacing(false);
   setStatus(`${template.label} placed.`);
   draw();
-}
-
-function mapCenterPoint() {
-  const bounds = state.bounds || computeBounds();
-  return {
-    x: (bounds.minX + bounds.maxX) * 0.5,
-    y: (bounds.minY + bounds.maxY) * 0.5,
-  };
-}
-
-function ensureDefaultExternalHdv() {
-  if (!ensureRuntimeForHdv()) return false;
-  if (state.runtime.humanVehicle()) return true;
-  const match = closestMapSegment(mapCenterPoint());
-  if (!match) return false;
-  state.runtime.placeHumanVehicle(match.segment, match.r, { ...defaultHdvTemplates()[1], version: "manta" });
-  setHdvPlacing(false);
-  draw();
-  return true;
 }
 
 function externalFrame() {
@@ -2485,6 +2537,16 @@ function externalFrame() {
   };
 }
 
+function sendExternalReset() {
+  const socket = state.external.socket;
+  state.external.frameSeq = 0;
+  state.external.awaitingCommand = false;
+  state.external.commands.clear();
+  if (socket && socket.readyState === WebSocket.OPEN) {
+    socket.send(JSON.stringify({ type: "reset" }));
+  }
+}
+
 function sendExternalFrame() {
   const socket = state.external.socket;
   if (!socket || socket.readyState !== WebSocket.OPEN) return;
@@ -2516,6 +2578,39 @@ function normalizeExternalCommands(message) {
     pushCommand(externalTargetForMessage(message), message);
   }
   return commands;
+}
+
+function normalizeExternalSpawns(message) {
+  const spawns = [];
+  const pushSpawn = (target, spawn) => {
+    if (!spawn) return;
+    const x = Number(spawn.x);
+    const y = Number(spawn.y);
+    const yaw = Number(spawn.yaw ?? spawn.theta);
+    if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(yaw)) return;
+    spawns.push({ ...spawn, target: target ? String(target) : externalTargetForMessage(spawn), x, y, yaw });
+  };
+
+  if (message.spawns && typeof message.spawns === "object" && !Array.isArray(message.spawns)) {
+    for (const [target, spawn] of Object.entries(message.spawns)) pushSpawn(target, spawn);
+  }
+  if (Array.isArray(message.spawns)) {
+    for (const spawn of message.spawns) pushSpawn(externalTargetForMessage(spawn), spawn);
+  }
+  if (message.commands && typeof message.commands === "object" && !Array.isArray(message.commands)) {
+    for (const [target, command] of Object.entries(message.commands)) {
+      if (command.spawn) pushSpawn(target, command.spawn);
+    }
+  }
+  if (Array.isArray(message.commands)) {
+    for (const command of message.commands) {
+      if (command.spawn) pushSpawn(externalTargetForMessage(command), command.spawn);
+    }
+  }
+  if (message.type === "spawn") {
+    pushSpawn(externalTargetForMessage(message), message);
+  }
+  return spawns;
 }
 
 function normalizeExternalTeleports(message) {
@@ -2562,6 +2657,12 @@ function applyExternalMessage(raw) {
     return;
   }
 
+  const spawns = normalizeExternalSpawns(message);
+  let appliedSpawns = 0;
+  for (const spawn of spawns) {
+    if (state.runtime?.spawnHumanVehicle(spawn)) appliedSpawns += 1;
+  }
+
   const teleports = normalizeExternalTeleports(message);
   let appliedTeleports = 0;
   for (const teleport of teleports) {
@@ -2572,7 +2673,7 @@ function applyExternalMessage(raw) {
   for (const command of commands) {
     state.external.commands.set(command.target, { vx: command.vx, vy: command.vy });
   }
-  if (!appliedTeleports && !commands.length) return;
+  if (!appliedSpawns && !appliedTeleports && !commands.length) return;
 
   state.external.awaitingCommand = false;
   draw();
@@ -2596,7 +2697,7 @@ function connectExternalController() {
     disconnectExternalController();
     return;
   }
-  if (!ensureDefaultExternalHdv()) return;
+  if (!ensureRuntimeForExternalController()) return;
 
   const url = externalUrlInput.value.trim() || "ws://127.0.0.1:8765";
   let socket;
@@ -2871,6 +2972,8 @@ resetButton.addEventListener("click", () => {
   }
   setPlaying(false);
   state.runtime.reset();
+  sendExternalReset();
+  sendExternalFrame();
   timeSlider.value = "1";
   setStatus(collisionStatusText() || "Simulation reset.");
   draw();

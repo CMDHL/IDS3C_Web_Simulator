@@ -18,6 +18,9 @@ PORT = 8765
 TARGET = "manta"
 SPEED = 0.35
 LIMIT = 0.75
+START_X = 0.949
+START_Y = -3.336
+START_YAW = 3.1416
 
 
 def recv_exact(conn, count):
@@ -100,7 +103,14 @@ def send_ws_text(conn, text):
 def command_for_frame(frame):
     car = frame.get("cars", {}).get(TARGET)
     if not car:
-        return {"type": "getFrame"}
+        return {
+            "type": "spawn",
+            "target": TARGET,
+            "model": "manta",
+            "x": START_X,
+            "y": START_Y,
+            "yaw": START_YAW,
+        }
 
     x = float(car.get("x", 0.0))
     direction = -1.0 if x > LIMIT else 1.0 if x < -LIMIT else command_for_frame.direction
@@ -138,7 +148,10 @@ def serve():
                         if not text:
                             continue
                         message = json.loads(text)
-                        if message.get("type") == "frame":
+                        if message.get("type") == "reset":
+                            command_for_frame.direction = 1.0
+                            send_ws_text(conn, json.dumps({"type": "getFrame"}))
+                        elif message.get("type") == "frame":
                             command = command_for_frame(message)
                             send_ws_text(conn, json.dumps(command))
                             print(

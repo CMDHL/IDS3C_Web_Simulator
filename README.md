@@ -1,7 +1,7 @@
 # ScaledCity Simulator
 
 This is an unfinished simulator for Cornell IDS Lab's scaled smart city.
-To use it, simply visit https://cmdhl.github.io/IDS3C_Web_Simulator/viewer/
+To use it, simply visit https://cmdhl.github.io/IDS3C_Web_Simulator/
 
 ## External controller API
 
@@ -17,7 +17,7 @@ browser on your machine, not by GitHub's servers. GitHub's servers do not
 directly access your local controller.
 
 There is no native C++ runtime in the viewer. The simulator state, controllers,
-and vehicle dynamics all run in `viewer/viewer.js`.
+and vehicle dynamics all run in `viewer.js`.
 
 Viewer-to-controller frame messages look like:
 
@@ -38,6 +38,13 @@ Viewer-to-controller frame messages look like:
 }
 ```
 
+When the simulator is reset, it sends a reset event and then a fresh frame.
+External controllers should clear any internal route/progress/controller state.
+
+```json
+{ "type": "reset" }
+```
+
 The controller can also request one current frame at any time:
 
 ```json
@@ -45,7 +52,24 @@ The controller can also request one current frame at any time:
 ```
 
 Controller-to-viewer command messages target HDVs by full car name. HDVs
-declared in Cars.yaml use names like `manta_101`.
+declared in Cars.yaml use names like `manta_101`; default external HDVs can use
+names like `manta` or `lotus`.
+
+An external controller can spawn the HDV at a global pose. Only one HDV is
+allowed at a time, so spawning replaces any existing HDV. `model` can be
+`manta` or `lotus`; if omitted, the viewer tries to infer it from `target`
+names like `lotus_101`.
+
+```json
+{
+  "type": "spawn",
+  "target": "lotus_101",
+  "model": "lotus",
+  "x": 0.949,
+  "y": -3.336,
+  "yaw": 3.1416
+}
+```
 
 ```json
 {
@@ -90,6 +114,29 @@ Run the dependency-free Python starter controller with:
 
 ```sh
 python3 examples/external_controller.py
+```
+
+Run the closed-loop route tracing controller with:
+
+```sh
+python3 examples/route_trace_controller.py
+```
+
+By default, it spawns the `manta` HDV at the start of a closed-loop route,
+commands world-frame `vx, vy` toward a lookahead point on that route, and stops
+after one lap. You can provide a different comma-separated segment list:
+
+```sh
+python3 examples/route_trace_controller.py --route S22,A27,S30,S49,A56,S58,A51,S51,S29,A14,S23
+```
+
+Useful options:
+
+```sh
+python3 examples/route_trace_controller.py --target manta --speed 0.32 --lookahead 0.18
+python3 examples/route_trace_controller.py --target lotus_101 --model lotus
+python3 examples/route_trace_controller.py --no-spawn
+python3 examples/route_trace_controller.py --loop
 ```
 
 ## Development notes
