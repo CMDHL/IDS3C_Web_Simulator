@@ -7,9 +7,9 @@ To use it, simply visit https://cmdhl.github.io/IDS3C_Web_Simulator/
 
 The viewer can connect to a controller running on the user's own computer.
 Open the viewer, run a local WebSocket server, then connect to
-`ws://127.0.0.1:8765` from the External Controller panel. If no HDV has been
-placed yet, connecting creates a default `manta` HDV on the map so the API can
-be tested without a Cars.yaml file.
+`ws://127.0.0.1:8765` from the External Controller panel. External controllers
+can spawn the HDV they want to control, so the API can be tested without a
+Cars.yaml file.
 
 GitHub Pages only serves the HTML, CSS, and JavaScript files. The code runs in
 your local browser, and the `ws://127.0.0.1:8765` connection is made by your
@@ -38,8 +38,9 @@ Viewer-to-controller frame messages look like:
 }
 ```
 
-When the simulator is reset, it sends a reset event and then a fresh frame.
-External controllers should clear any internal route/progress/controller state.
+When the simulator is reset, it sends a reset event. External controllers should
+clear any internal route/progress/controller state. If Auto Send Frames is
+enabled, the viewer then sends a fresh frame.
 
 ```json
 { "type": "reset" }
@@ -50,6 +51,14 @@ The controller can also request one current frame at any time:
 ```json
 { "type": "getFrame" }
 ```
+
+`getFrame` always returns one frame immediately. Auto Send Frames controls
+whether the simulator also pushes frames that were not requested with
+`getFrame`. The transport panel's Step Time (s) control sets the simulator
+advance step size. The same step time also sets the automatic external frame
+cadence in simulator time, and Synchronize Frames makes the simulator wait for a
+controller response after each sent frame before advancing again. With the
+default step time of 0.1 s, the automatic external-control cadence is 10 Hz.
 
 Controller-to-viewer command messages target HDVs by full car name. HDVs
 declared in Cars.yaml use names like `manta_101`; default external HDVs can use
@@ -112,13 +121,13 @@ Teleport requests can also be batched:
 Run the dependency-free Python starter controller with:
 
 ```sh
-python3 examples/external_controller.py
+python3 examples/external_controllers/dummy_controller.py
 ```
 
 Run the closed-loop route tracing controller with:
 
 ```sh
-python3 examples/route_trace_controller.py
+python3 examples/external_controllers/route_trace_controller.py
 ```
 
 By default, it spawns the `manta` HDV at the start of a closed-loop route,
@@ -126,16 +135,16 @@ commands world-frame `vx, vy` toward a lookahead point on that route, and stops
 after one lap. You can provide a different comma-separated segment list:
 
 ```sh
-python3 examples/route_trace_controller.py --route S22,A27,S30,S49,A56,S58,A51,S51,S29,A14,S23
+python3 examples/external_controllers/route_trace_controller.py --route S22,A27,S30,S49,A56,S58,A51,S51,S29,A14,S23
 ```
 
 Useful options:
 
 ```sh
-python3 examples/route_trace_controller.py --target manta --speed 0.32 --lookahead 0.18
-python3 examples/route_trace_controller.py --target lotus_101
-python3 examples/route_trace_controller.py --no-spawn
-python3 examples/route_trace_controller.py --loop
+python3 examples/external_controllers/route_trace_controller.py --target manta --speed 0.32 --lookahead 0.18
+python3 examples/external_controllers/route_trace_controller.py --target lotus_101
+python3 examples/external_controllers/route_trace_controller.py --no-spawn
+python3 examples/external_controllers/route_trace_controller.py --loop
 ```
 
 ## Development notes

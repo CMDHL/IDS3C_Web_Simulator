@@ -91,6 +91,7 @@ const playButton = document.querySelector("#playButton");
 const resetButton = document.querySelector("#resetButton");
 const timeSlider = document.querySelector("#timeSlider");
 const speedSelect = document.querySelector("#speedSelect");
+const simStepInput = document.querySelector("#simStepInput");
 const linesInput = document.querySelector("#linesInput");
 const arcsInput = document.querySelector("#arcsInput");
 const carsInput = document.querySelector("#carsInput");
@@ -101,6 +102,7 @@ const hdvSteeringSlider = document.querySelector("#hdvSteeringSlider");
 const externalUrlInput = document.querySelector("#externalUrlInput");
 const externalConnectButton = document.querySelector("#externalConnectButton");
 const externalCommandLockInput = document.querySelector("#externalCommandLockInput");
+const externalAutoFrameInput = document.querySelector("#externalAutoFrameInput");
 const errorDialog = document.querySelector("#errorDialog");
 const errorMessage = document.querySelector("#errorMessage");
 const errorCloseButton = document.querySelector("#errorCloseButton");
@@ -111,6 +113,7 @@ const state = {
   runtime: null,
   playing: false,
   lastTickMs: 0,
+  simStep: 0.1,
   bounds: null,
   backgroundImage: null,
   backgroundReady: false,
@@ -135,6 +138,9 @@ const state = {
     connected: false,
     frameSeq: 0,
     commandLock: true,
+    autoFrames: true,
+    frameCarry: 0,
+    lastFrameTime: null,
     awaitingCommand: false,
     commands: new Map(),
     lastError: "",
@@ -2535,9 +2541,15 @@ function externalFrame() {
   };
 }
 
+function simulationStepSize() {
+  return clamp(Number(state.simStep) || 0.1, 0.01, 2);
+}
+
 function sendExternalReset() {
   const socket = state.external.socket;
   state.external.frameSeq = 0;
+  state.external.frameCarry = 0;
+  state.external.lastFrameTime = null;
   state.external.awaitingCommand = false;
   state.external.commands.clear();
   if (socket && socket.readyState === WebSocket.OPEN) {
@@ -2545,13 +2557,21 @@ function sendExternalReset() {
   }
 }
 
-function sendExternalFrame() {
+function sendExternalFrame(options = {}) {
+  const requested = Boolean(options.requested);
   const socket = state.external.socket;
-  if (!socket || socket.readyState !== WebSocket.OPEN) return;
+  if (!socket || socket.readyState !== WebSocket.OPEN) return false;
+  if (!requested && !state.external.autoFrames) return false;
+  const time = state.runtime?.time || 0;
+  if (!requested && state.external.lastFrameTime != null && time - state.external.lastFrameTime < simulationStepSize() - 1e-9) {
+    return false;
+  }
   socket.send(JSON.stringify(externalFrame()));
+  state.external.lastFrameTime = time;
   if (state.external.commandLock && state.external.connected) {
     state.external.awaitingCommand = true;
   }
+  return true;
 }
 
 function normalizeExternalCommands(message) {
@@ -2651,7 +2671,7 @@ function applyExternalMessage(raw) {
   }
 
   if (message.type === "getFrame" || message.type === "requestFrame") {
-    sendExternalFrame();
+    sendExternalFrame({ requested: true });
     return;
   }
 
@@ -2733,9 +2753,14 @@ function tick(nowMs) {
   }
   const elapsed = state.lastTickMs ? (nowMs - state.lastTickMs) / 1000 : 0;
   state.lastTickMs = nowMs;
-  const dt = state.external.commandLock && state.external.connected
-    ? MAINFRAME_DT
-    : Math.min(0.08, elapsed * Number(speedSelect.value));
+  const step = simulationStepSize();
+  state.external.frameCarry += elapsed * Number(speedSelect.value);
+  if (state.external.frameCarry < step) {
+    requestAnimationFrame(tick);
+    return;
+  }
+  state.external.frameCarry = Math.min(state.external.frameCarry - step, step);
+  const dt = step;
   const advanced = state.runtime?.step(dt);
   if (state.runtime?.collision.hasCollision) {
     setPlaying(false);
@@ -2886,7 +2911,30 @@ externalConnectButton.addEventListener("click", connectExternalController);
 externalCommandLockInput.addEventListener("change", () => {
   state.external.commandLock = externalCommandLockInput.checked;
   state.external.awaitingCommand = false;
+  state.external.frameCarry = 0;
+  state.external.lastFrameTime = null;
   if (state.external.commandLock && state.external.connected) {
+    sendExternalFrame();
+  }
+});
+
+externalAutoFrameInput.addEventListener("change", () => {
+  state.external.autoFrames = externalAutoFrameInput.checked;
+  state.external.awaitingCommand = false;
+  state.external.frameCarry = 0;
+  state.external.lastFrameTime = null;
+  if (state.external.autoFrames && state.external.connected) {
+    sendExternalFrame();
+  }
+});
+
+simStepInput.addEventListener("change", () => {
+  const step = clamp(Number(simStepInput.value) || 0.1, 0.01, 2);
+  state.simStep = step;
+  simStepInput.value = String(step);
+  state.external.frameCarry = 0;
+  state.external.lastFrameTime = null;
+  if (state.external.autoFrames && state.external.connected) {
     sendExternalFrame();
   }
 });

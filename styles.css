@@ -110,7 +110,7 @@ canvas {
 }
 
 .transport {
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: minmax(0, 1fr) minmax(72px, auto);
   align-items: center;
   gap: 8px;
 }
@@ -120,13 +120,8 @@ canvas {
   display: grid;
 }
 
-.transport .slider-label,
-.transport input[type="range"] {
+.transport .time-control {
   grid-column: 1 / -1;
-}
-
-.transport .speed-label {
-  justify-self: start;
 }
 
 button,
@@ -151,16 +146,60 @@ select {
   padding: 0 8px;
 }
 
+.transport input[type="number"] {
+  width: 68px;
+  min-height: 32px;
+  padding: 0 6px;
+  border: 1px solid #98a8ae;
+  border-radius: 6px;
+  background: #ffffff;
+  color: #172026;
+}
+
 input[type="range"] {
   width: 100%;
   accent-color: #2f7f86;
 }
 
-.slider-label,
-.speed-label,
-.file-grid label {
+.slider-control {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
   color: #46565e;
   white-space: nowrap;
+}
+
+.file-grid label {
+  color: #172026;
+  white-space: nowrap;
+}
+
+.slider-control input {
+  min-width: 0;
+}
+
+.compact-control {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  color: #46565e;
+  white-space: nowrap;
+}
+
+.compact-control select,
+.compact-control input {
+  min-width: 0;
+}
+
+.speed-control select {
+  width: 76px;
+}
+
+.step-control {
+  justify-self: end;
 }
 
 .file-grid {
@@ -217,8 +256,7 @@ input[type="file"] {
   min-height: 18px;
 }
 
-.steering-label,
-#hdvSteeringSlider {
+.steering-control {
   grid-column: 1 / -1;
 }
 
@@ -334,8 +372,7 @@ canvas.is-placing-hdv {
     grid-template-columns: 1fr 1fr;
   }
 
-  .transport input[type="range"],
-  .slider-label {
+  .time-control {
     grid-column: 1 / -1;
   }
 

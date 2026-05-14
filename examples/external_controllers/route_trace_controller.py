@@ -343,7 +343,7 @@ def build_arg_parser():
 
 
 def serve(args):
-    map_dir = Path(__file__).resolve().parents[1] / "assets" / "default_map"
+    map_dir = Path(__file__).resolve().parents[2] / "assets" / "default_map"
     all_segments = load_map(map_dir)
     route_names = parse_route(args.route)
     missing = [segment_id for segment_id in route_names if segment_id not in all_segments]

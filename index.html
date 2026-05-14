@@ -12,15 +12,23 @@
         <div class="transport">
           <button id="playButton" type="button">Start</button>
           <button id="resetButton" type="button">Reset</button>
-          <label class="slider-label" for="timeSlider">Time</label>
-          <input id="timeSlider" type="range" min="0" max="1" value="0" step="0.001">
-          <label class="speed-label" for="speedSelect">Speed</label>
-          <select id="speedSelect">
-            <option value="0.5">0.5x</option>
-            <option value="1" selected>1x</option>
-            <option value="2">2x</option>
-            <option value="4">4x</option>
-          </select>
+          <label class="compact-control speed-control" for="speedSelect">
+            <span>Play Speed</span>
+            <select id="speedSelect">
+              <option value="0.5">0.5x</option>
+              <option value="1" selected>1x</option>
+              <option value="2">2x</option>
+              <option value="4">4x</option>
+            </select>
+          </label>
+          <label class="compact-control step-control" for="simStepInput">
+            <span>Step Time (s)</span>
+            <input id="simStepInput" type="number" min="0.01" max="2" step="0.01" value="0.1">
+          </label>
+          <label class="slider-control time-control" for="timeSlider">
+            <span>Time</span>
+            <input id="timeSlider" type="range" min="0" max="1" value="0" step="0.001">
+          </label>
         </div>
 
         <div class="file-grid">
@@ -49,8 +57,10 @@
             <option value="manta" selected>manta</option>
           </select>
           <button id="placeHdvButton" type="button">Place</button>
-          <label class="steering-label" for="hdvSteeringSlider">steering angle</label>
-          <input id="hdvSteeringSlider" type="range" min="-45" max="45" value="0" step="1">
+          <label class="slider-control steering-control" for="hdvSteeringSlider">
+            <span>Steering Angle</span>
+            <input id="hdvSteeringSlider" type="range" min="-45" max="45" value="0" step="1">
+          </label>
           <p class="hdv-instructions">W/S: change speed<br>SPACE: brake</p>
         </div>
 
@@ -61,6 +71,10 @@
           <label class="external-checkbox" title="Wait for an external command before advancing each frame.">
             <input id="externalCommandLockInput" type="checkbox" checked>
             <span>Synchronize Frames</span>
+          </label>
+          <label class="external-checkbox" title="Automatically push frame messages without waiting for getFrame requests.">
+            <input id="externalAutoFrameInput" type="checkbox" checked>
+            <span>Auto Send Frames</span>
           </label>
         </div>
       </section>
